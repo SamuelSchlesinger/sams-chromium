@@ -145,8 +145,7 @@ ModeratedEndorsementServiceImpl::~ModeratedEndorsementServiceImpl() {
 }
 
 MoleClientHolder& ModeratedEndorsementServiceImpl::holder() {
-  return MoleClientHolder::GetOrCreate(
-      render_frame_host().GetBrowserContext());
+  return MoleClientHolder::GetOrCreate(render_frame_host().GetBrowserContext());
 }
 
 void ModeratedEndorsementServiceImpl::Fetch(
@@ -181,8 +180,8 @@ void ModeratedEndorsementServiceImpl::Fetch(
         net::SiteForCookies::FromOrigin(document_origin);
   }
   if (!authorization.empty()) {
-    resource_request->headers.SetHeader(
-        net::HttpRequestHeaders::kAuthorization, authorization);
+    resource_request->headers.SetHeader(net::HttpRequestHeaders::kAuthorization,
+                                        authorization);
   }
 
   auto loader = network::SimpleURLLoader::Create(std::move(resource_request),
@@ -196,8 +195,8 @@ void ModeratedEndorsementServiceImpl::Fetch(
   loader->SetTimeoutDuration(base::Seconds(30));
 
   network::SimpleURLLoader* loader_ptr = loader.get();
-  auto it =
-      loaders_in_progress_.insert(loaders_in_progress_.begin(), std::move(loader));
+  auto it = loaders_in_progress_.insert(loaders_in_progress_.begin(),
+                                        std::move(loader));
   // Unretained is safe: the loader is owned by `this` and never outlives it.
   loader_ptr->DownloadToString(
       url_loader_factory_.get(),
@@ -231,16 +230,15 @@ void ModeratedEndorsementServiceImpl::Collect(const GURL& endorse_url,
   }
   // Defer until the persisted endorsement store has loaded, so a grant never
   // races the async restore.
-  holder().PostWhenLoaded(
-      base::BindOnce(&ModeratedEndorsementServiceImpl::CollectImpl,
-                     weak_factory_.GetWeakPtr(), endorse_url,
-                     std::move(callback)));
+  holder().PostWhenLoaded(base::BindOnce(
+      &ModeratedEndorsementServiceImpl::CollectImpl, weak_factory_.GetWeakPtr(),
+      endorse_url, std::move(callback)));
 }
 
 void ModeratedEndorsementServiceImpl::CollectImpl(const GURL& endorse_url,
                                                   CollectCallback callback) {
-  GURL directory_url = endorse_url.GetWithEmptyPath().Resolve(
-      kAnchorDirectoryPath);
+  GURL directory_url =
+      endorse_url.GetWithEmptyPath().Resolve(kAnchorDirectoryPath);
   Fetch(directory_url, /*authorization=*/{}, /*post_body=*/nullptr,
         /*send_credentials=*/true,
         base::BindOnce(&ModeratedEndorsementServiceImpl::OnAnchorDirectory,
@@ -272,8 +270,8 @@ void ModeratedEndorsementServiceImpl::OnAnchorDirectory(
     return;
   }
 
-  GURL grant_url = endorse_url.GetWithEmptyPath().Resolve(
-      std::string(begin.endorse_path));
+  GURL grant_url =
+      endorse_url.GetWithEmptyPath().Resolve(std::string(begin.endorse_path));
   Fetch(grant_url, /*authorization=*/{},
         std::make_unique<std::string>(BytesToString(begin.request_body)),
         /*send_credentials=*/true,
@@ -326,10 +324,9 @@ void ModeratedEndorsementServiceImpl::Challenge(const GURL& resource_url,
                      std::move(callback), /*attempt=*/0));
 }
 
-void ModeratedEndorsementServiceImpl::StartChallenge(
-    const GURL& resource_url,
-    ChallengeCallback callback,
-    int attempt) {
+void ModeratedEndorsementServiceImpl::StartChallenge(const GURL& resource_url,
+                                                     ChallengeCallback callback,
+                                                     int attempt) {
   if (attempt >= kMaxChallengeAttempts) {
     std::move(callback).Run(EndorsementStatus::kRejected, std::string());
     return;
@@ -412,8 +409,8 @@ void ModeratedEndorsementServiceImpl::OnChallengeProbe(
   client_holder.redeem_in_flight = true;
   owns_redeem_flight_ = true;
 
-  GURL directory_url = resource_url.GetWithEmptyPath().Resolve(
-      kModeratorDirectoryPath);
+  GURL directory_url =
+      resource_url.GetWithEmptyPath().Resolve(kModeratorDirectoryPath);
   Fetch(directory_url, /*authorization=*/{}, /*post_body=*/nullptr,
         /*send_credentials=*/false,
         base::BindOnce(&ModeratedEndorsementServiceImpl::OnModeratorDirectory,
@@ -521,8 +518,8 @@ void ModeratedEndorsementServiceImpl::FinishRedeemFlight() {
       std::move(client_holder.pool_waiters);
   client_holder.pool_waiters.clear();
   for (auto& waiter : waiters) {
-    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, std::move(waiter));
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+                                                             std::move(waiter));
   }
 }
 
@@ -531,7 +528,11 @@ void ModeratedEndorsementServiceImpl::Present(
     ChallengeCallback callback,
     int attempt,
     const std::vector<std::string>& www_authenticate) {
-  auto begin = holder().client().present_begin(ToRustStrings(www_authenticate));
+  auto commitment =
+      MoleCommitmentRegistry::GetInstance().GetModeratorCommitment(
+          url::Origin::Create(resource_url));
+  auto begin = holder().client().present_begin(ToRustStrings(www_authenticate),
+                                               commitment);
   if (!begin.ok) {
     // Lost a pool race (or drained a spent credential): retry from the
     // probe, which will steer into Redeem & Issue if the pool is empty.
@@ -576,7 +577,8 @@ void ModeratedEndorsementServiceImpl::OnPresentExchange(
   } else {
     holder().client().present_abort(presentation_id);
   }
-  // The drawn credential's successor (or its removal) changed the pool; persist.
+  // The drawn credential's successor (or its removal) changed the pool;
+  // persist.
   holder().SchedulePersist();
   std::move(callback).Run(EndorsementStatus::kSuccess,
                           body ? *body : std::string());

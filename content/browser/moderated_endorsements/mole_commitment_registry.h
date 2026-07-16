@@ -73,6 +73,8 @@ class CONTENT_EXPORT MoleCommitmentRegistry {
     Bytes act_domain_separator;
     std::vector<Bytes> accepted_anchor_keys;
     std::vector<Bytes> epochs;
+    uint64_t charge = 0;
+    uint64_t topup = 0;
   };
   struct CommittedModerator {
     std::vector<CommittedPolicy> policies;

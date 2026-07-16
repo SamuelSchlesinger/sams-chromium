@@ -16,8 +16,8 @@ constexpr char kEpoch[] = "epoch-unittest-1";
 constexpr char kPolicy[] = "policy-unittest-1";
 
 rust::Slice<const uint8_t> AsSlice(const std::string& s) {
-  return rust::Slice<const uint8_t>(
-      reinterpret_cast<const uint8_t*>(s.data()), s.size());
+  return rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()),
+                                    s.size());
 }
 
 rust::Slice<const uint8_t> AsSlice(const rust::Vec<uint8_t>& v) {
@@ -58,8 +58,8 @@ Deployment Deploy(uint64_t initial_credits,
   auto moderator =
       new_test_moderator(accepted, AsSlice(kEpoch), AsSlice(kPolicy),
                          initial_credits, issuance_batch, charge, refund);
-  return Deployment{std::move(anchor), std::move(decoys),
-                    std::move(moderator), new_mole_browser_client()};
+  return Deployment{std::move(anchor), std::move(decoys), std::move(moderator),
+                    new_mole_browser_client()};
 }
 
 // Runs the two-exchange grant flow; returns true on success.
@@ -72,7 +72,8 @@ bool CollectEndorsement(Deployment& d) {
     return false;
   }
 
-  TestHttpResponse first = d.anchor->handle_endorse(AsSlice(begin.request_body));
+  TestHttpResponse first =
+      d.anchor->handle_endorse(AsSlice(begin.request_body));
   if (first.status != 200) {
     ADD_FAILURE() << "first grant exchange: " << first.status;
     return false;
@@ -83,7 +84,8 @@ bool CollectEndorsement(Deployment& d) {
     return false;
   }
 
-  TestHttpResponse second = d.anchor->handle_endorse(AsSlice(step.request_body));
+  TestHttpResponse second =
+      d.anchor->handle_endorse(AsSlice(step.request_body));
   if (second.status != 200) {
     ADD_FAILURE() << "second grant exchange: " << second.status;
     return false;
@@ -130,7 +132,8 @@ size_t RedeemAndIssue(Deployment& d) {
 // One full presentation: draw, send, finalize. Returns the resource body.
 std::string Present(Deployment& d) {
   TestHttpResponse challenge = d.moderator->handle_resource("");
-  PresentBegin begin = d.client->present_begin(challenge.www_authenticate);
+  PresentBegin begin = d.client->present_begin(
+      challenge.www_authenticate, d.moderator->moderator_commitment());
   if (!begin.ok) {
     ADD_FAILURE() << "present_begin: " << std::string(begin.error);
     return "";
@@ -195,9 +198,12 @@ TEST(MoleClientTest, ParallelPresentationsFromOnePool) {
   TestHttpResponse challenge = d.moderator->handle_resource("");
 
   // Draw three Credentials before any response returns.
-  PresentBegin a = d.client->present_begin(challenge.www_authenticate);
-  PresentBegin b = d.client->present_begin(challenge.www_authenticate);
-  PresentBegin c = d.client->present_begin(challenge.www_authenticate);
+  PresentBegin a = d.client->present_begin(challenge.www_authenticate,
+                                           d.moderator->moderator_commitment());
+  PresentBegin b = d.client->present_begin(challenge.www_authenticate,
+                                           d.moderator->moderator_commitment());
+  PresentBegin c = d.client->present_begin(challenge.www_authenticate,
+                                           d.moderator->moderator_commitment());
   ASSERT_TRUE(a.ok && b.ok && c.ok);
   EXPECT_EQ(d.client->pool_size(AsSlice(kPolicy)), 1u);
 
@@ -212,18 +218,18 @@ TEST(MoleClientTest, ParallelPresentationsFromOnePool) {
   EXPECT_EQ(ra.status, 200);
   EXPECT_EQ(rb.status, 200);
 
-  EXPECT_TRUE(d.client
-                  ->present_finish(c.presentation_id,
-                                   std::string(rc.mole_credential))
-                  .ok);
-  EXPECT_TRUE(d.client
-                  ->present_finish(a.presentation_id,
-                                   std::string(ra.mole_credential))
-                  .ok);
-  EXPECT_TRUE(d.client
-                  ->present_finish(b.presentation_id,
-                                   std::string(rb.mole_credential))
-                  .ok);
+  EXPECT_TRUE(
+      d.client
+          ->present_finish(c.presentation_id, std::string(rc.mole_credential))
+          .ok);
+  EXPECT_TRUE(
+      d.client
+          ->present_finish(a.presentation_id, std::string(ra.mole_credential))
+          .ok);
+  EXPECT_TRUE(
+      d.client
+          ->present_finish(b.presentation_id, std::string(rb.mole_credential))
+          .ok);
 
   EXPECT_EQ(d.client->pool_size(AsSlice(kPolicy)), 4u);
   EXPECT_EQ(d.moderator->spend_nullifier_count(), 3u);
@@ -237,7 +243,8 @@ TEST(MoleClientTest, ReplayedPresentationRejected) {
   ASSERT_EQ(RedeemAndIssue(d), 2u);
 
   TestHttpResponse challenge = d.moderator->handle_resource("");
-  PresentBegin begin = d.client->present_begin(challenge.www_authenticate);
+  PresentBegin begin = d.client->present_begin(
+      challenge.www_authenticate, d.moderator->moderator_commitment());
   ASSERT_TRUE(begin.ok);
 
   std::string header(begin.authorization_header);
@@ -301,7 +308,8 @@ TEST(MoleClientTest, ExhaustedPoolSteersBackToRedemption) {
 
   // Drawing it fails (cannot cover the charge) and drains it from the pool.
   TestHttpResponse challenge = d.moderator->handle_resource("");
-  PresentBegin begin = d.client->present_begin(challenge.www_authenticate);
+  PresentBegin begin = d.client->present_begin(
+      challenge.www_authenticate, d.moderator->moderator_commitment());
   EXPECT_FALSE(begin.ok);
   EXPECT_EQ(d.client->pool_size(AsSlice(kPolicy)), 0u);
 
@@ -335,12 +343,13 @@ TEST(MoleClientTest, PresentationBoundToChallenge) {
       accepted, AsSlice(kEpoch), AsSlice("policy-other"), 2, 2, 1, 0);
 
   TestHttpResponse challenge = d.moderator->handle_resource("");
-  PresentBegin begin = d.client->present_begin(challenge.www_authenticate);
+  PresentBegin begin = d.client->present_begin(
+      challenge.www_authenticate, d.moderator->moderator_commitment());
   ASSERT_TRUE(begin.ok);
 
   // The wrong moderator rejects it without recording anything.
-  TestHttpResponse wrong = other_moderator->handle_resource(
-      std::string(begin.authorization_header));
+  TestHttpResponse wrong =
+      other_moderator->handle_resource(std::string(begin.authorization_header));
   EXPECT_EQ(wrong.status, 403);
   EXPECT_EQ(other_moderator->spend_nullifier_count(), 0u);
 
@@ -431,7 +440,8 @@ TEST(MoleClientCommitmentTest, GrantRefusedForUncommittedKey) {
   std::string directory(d.anchor->anchor_directory_json());
   // Commit a DIFFERENT anchor's key, so the served key is off-registry.
   auto other = new_test_anchor(AsSlice(kEpoch));
-  GrantBegin begin = d.client->grant_begin(directory, other->anchor_commitment());
+  GrantBegin begin =
+      d.client->grant_begin(directory, other->anchor_commitment());
   EXPECT_FALSE(begin.ok);
 }
 
@@ -484,6 +494,19 @@ TEST(MoleClientCommitmentTest, RedeemRefusedForCraftedAcceptedSet) {
       std::string(d.moderator->moderator_directory_json()),
       challenge.www_authenticate, c);
   EXPECT_FALSE(redeem.ok);
+}
+
+// A per-user charge (the amount-partitioning channel) is refused: the
+// challenge's charge differs from the committed policy-wide constant.
+TEST(MoleClientCommitmentTest, PresentRefusedForUncommittedCharge) {
+  Deployment d = Deploy(2, 4, /*charge=*/1, 0, /*decoy_anchors=*/0);
+  ASSERT_TRUE(CollectEndorsement(d));
+  ASSERT_EQ(RedeemAndIssue(d), 4u);
+  TestHttpResponse challenge = d.moderator->handle_resource("");
+  ModeratorCommitment c = d.moderator->moderator_commitment();
+  c.policies[0].charge = 999;  // Not what the challenge advertises.
+  PresentBegin begin = d.client->present_begin(challenge.www_authenticate, c);
+  EXPECT_FALSE(begin.ok);
 }
 
 }  // namespace

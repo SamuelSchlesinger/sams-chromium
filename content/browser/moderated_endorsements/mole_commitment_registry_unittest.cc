@@ -30,23 +30,33 @@ url::Origin Origin(const std::string& s) {
 }
 
 // A registry document naming one anchor (key "AK", epoch "E1") and one
-// moderator (policy "P", act key "MK", domain "D", accepted {"AK"}, epoch "E1").
+// moderator (policy "P", act key "MK", domain "D", accepted {"AK"}, epoch
+// "E1").
 std::string SampleRegistry() {
   return R"({
     "anchors": {
       "https://anchor.example": {
-        "keys": [")" + B64("AK") + R"("],
-        "epochs": [")" + B64("E1") + R"("]
+        "keys": [")" +
+         B64("AK") + R"("],
+        "epochs": [")" +
+         B64("E1") + R"("]
       }
     },
     "moderators": {
       "https://mod.example": {
         "policies": [{
-          "policy-context": ")" + B64("P") + R"(",
-          "act-public-key": ")" + B64("MK") + R"(",
-          "act-domain-separator": ")" + B64("D") + R"(",
-          "accepted-anchor-keys": [")" + B64("AK") + R"("],
-          "epochs": [")" + B64("E1") + R"("]
+          "policy-context": ")" +
+         B64("P") + R"(",
+          "act-public-key": ")" +
+         B64("MK") + R"(",
+          "act-domain-separator": ")" +
+         B64("D") + R"(",
+          "accepted-anchor-keys": [")" +
+         B64("AK") + R"("],
+          "epochs": [")" +
+         B64("E1") + R"("],
+          "charge": 1,
+          "topup": 0
         }]
       }
     }
@@ -55,7 +65,9 @@ std::string SampleRegistry() {
 
 class MoleCommitmentRegistryTest : public testing::Test {
  protected:
-  void SetUp() override { MoleCommitmentRegistry::GetInstance().ClearForTesting(); }
+  void SetUp() override {
+    MoleCommitmentRegistry::GetInstance().ClearForTesting();
+  }
   void TearDown() override {
     MoleCommitmentRegistry::GetInstance().ClearForTesting();
   }
@@ -85,10 +97,12 @@ TEST_F(MoleCommitmentRegistryTest, ParsesAndReturnsCommittedModerator) {
   EXPECT_TRUE(mod.found);
   ASSERT_EQ(mod.policies.size(), 1u);
   const auto& p = mod.policies[0];
-  EXPECT_EQ(std::vector<uint8_t>(p.policy_context.begin(), p.policy_context.end()),
-            Bytes("P"));
-  EXPECT_EQ(std::vector<uint8_t>(p.act_public_key.begin(), p.act_public_key.end()),
-            Bytes("MK"));
+  EXPECT_EQ(
+      std::vector<uint8_t>(p.policy_context.begin(), p.policy_context.end()),
+      Bytes("P"));
+  EXPECT_EQ(
+      std::vector<uint8_t>(p.act_public_key.begin(), p.act_public_key.end()),
+      Bytes("MK"));
   EXPECT_EQ(std::vector<uint8_t>(p.act_domain_separator.begin(),
                                  p.act_domain_separator.end()),
             Bytes("D"));
@@ -96,6 +110,8 @@ TEST_F(MoleCommitmentRegistryTest, ParsesAndReturnsCommittedModerator) {
   EXPECT_EQ(std::vector<uint8_t>(p.accepted_anchor_keys[0].bytes.begin(),
                                  p.accepted_anchor_keys[0].bytes.end()),
             Bytes("AK"));
+  EXPECT_EQ(p.charge, 1u);
+  EXPECT_EQ(p.topup, 0u);
 }
 
 TEST_F(MoleCommitmentRegistryTest, UnenrolledOriginIsNotFound) {

@@ -29,8 +29,8 @@ use act_boring::proofs::request_context_scalar;
 use act_boring::spend::{prove_spend, scalar_to_u128, PreRefund, Refund, SpendProof};
 use act_boring::{
     CreditToken, IssuanceRequest as ActIssuanceRequestMsg,
-    IssuanceResponse as ActIssuanceResponseMsg, Params, PreIssuance,
-    PrivateKey as ActPrivateKey, PublicKey as ActPublicKey, Scalar as ActScalar,
+    IssuanceResponse as ActIssuanceResponseMsg, Params, PreIssuance, PrivateKey as ActPrivateKey,
+    PublicKey as ActPublicKey, Scalar as ActScalar,
 };
 // IHAT runs on ihat_boring (BoringSSL P-256), a byte-compatible drop-in for the
 // former `ihat` crate. Anchor public keys are group elements (`IhatKey`).
@@ -167,6 +167,12 @@ mod ffi {
         act_domain_separator: Vec<u8>,
         accepted_anchor_keys: Vec<Blob>,
         epochs: Vec<Blob>,
+        /// The spend/top-up amounts. The spec makes these policy-wide
+        /// constants: a Moderator that varies `charge` or `topup` per Client
+        /// partitions the anonymity set, so a presentation whose challenged
+        /// amounts differ from these is refused.
+        charge: u64,
+        topup: u64,
     }
 
     /// The committed policies the registry authorizes for one Moderator origin.
@@ -229,10 +235,13 @@ mod ffi {
         ) -> RedeemFinish;
 
         /// Draw a Credential from the pool and build the presentation
-        /// `Authorization` header answering the given challenge.
+        /// `Authorization` header answering the given challenge. `commitment`
+        /// pins the policy's `charge`/`topup`; a challenge whose amounts differ
+        /// is refused.
         fn present_begin(
             self: &mut MoleBrowserClient,
             www_authenticate: &Vec<String>,
+            commitment: &ModeratorCommitment,
         ) -> PresentBegin;
 
         /// Finalize a presentation from the response's `Mole-Credential`
@@ -303,8 +312,7 @@ mod ffi {
 
 use ffi::{
     AnchorCommitment, Blob, ChallengeEval, CommittedPolicy, GrantBegin, GrantStep,
-    ModeratorCommitment, PresentBegin, RedeemBegin, RedeemFinish, StatusResult,
-    TestHttpResponse,
+    ModeratorCommitment, PresentBegin, RedeemBegin, RedeemFinish, StatusResult, TestHttpResponse,
 };
 
 fn ok_status() -> StatusResult {
@@ -468,16 +476,11 @@ impl MoleBrowserClient {
         if !commitment.keys.iter().any(|k| k.bytes[..] == anchor_key[..]) {
             return fail("anchor key is not in the committed set".into());
         }
-        let endorsement_context =
-            match mole_core::http::b64_decode(&config.endorsement_context) {
-                Ok(c) => c,
-                Err(e) => return fail(format!("endorsement context encoding: {e}")),
-            };
-        if !commitment
-            .epochs
-            .iter()
-            .any(|e| e.bytes[..] == endorsement_context[..])
-        {
+        let endorsement_context = match mole_core::http::b64_decode(&config.endorsement_context) {
+            Ok(c) => c,
+            Err(e) => return fail(format!("endorsement context encoding: {e}")),
+        };
+        if !commitment.epochs.iter().any(|e| e.bytes[..] == endorsement_context[..]) {
             return fail("endorsement epoch is not committed".into());
         }
 
@@ -490,16 +493,11 @@ impl MoleBrowserClient {
             return fail("signature request does not encode".into());
         };
 
-        self.grant = Some(GrantState::NeedsSignature {
-            pending,
-            anchor_key,
-            endorsement_context,
-        });
+        self.grant = Some(GrantState::NeedsSignature { pending, anchor_key, endorsement_context });
 
         let body = EndorsementRequest {
             endorsement_type: endorsement_type::IHAT,
-            body: IhatGrantRequest::Step1 { signature_request: signature_request_bytes }
-                .to_bytes(),
+            body: IhatGrantRequest::Step1 { signature_request: signature_request_bytes }.to_bytes(),
         };
         GrantBegin {
             ok: true,
@@ -510,12 +508,8 @@ impl MoleBrowserClient {
     }
 
     fn grant_step(&mut self, response_body: &[u8]) -> GrantStep {
-        let fail = |error: String| GrantStep {
-            ok: false,
-            error,
-            done: false,
-            request_body: Vec::new(),
-        };
+        let fail =
+            |error: String| GrantStep { ok: false, error, done: false, request_body: Vec::new() };
 
         let Some(state) = self.grant.take() else {
             return fail("no grant in progress".into());
@@ -543,16 +537,12 @@ impl MoleBrowserClient {
                 let Ok(anchor_public_key) = decode_anchor_key(&anchor_key) else {
                     return fail("anchor key does not decode".into());
                 };
-                let (proof_request, pending) =
-                    pending.request_proof(anchor_public_key, signature);
+                let (proof_request, pending) = pending.request_proof(anchor_public_key, signature);
                 let Ok(proof_request_bytes) = proof_request.to_wire() else {
                     return fail("proof request does not encode".into());
                 };
-                self.grant = Some(GrantState::NeedsProof {
-                    pending,
-                    anchor_key,
-                    endorsement_context,
-                });
+                self.grant =
+                    Some(GrantState::NeedsProof { pending, anchor_key, endorsement_context });
                 let body = EndorsementRequest {
                     endorsement_type: endorsement_type::IHAT,
                     body: IhatGrantRequest::Step2 {
@@ -585,12 +575,7 @@ impl MoleBrowserClient {
                     anchor_key,
                     endorsement_context,
                 });
-                GrantStep {
-                    ok: true,
-                    error: String::new(),
-                    done: true,
-                    request_body: Vec::new(),
-                }
+                GrantStep { ok: true, error: String::new(), done: true, request_body: Vec::new() }
             }
             _ => fail("anchor answered with the wrong grant step".into()),
         }
@@ -599,10 +584,8 @@ impl MoleBrowserClient {
     fn challenge_eval(&mut self, www_authenticate: &Vec<String>) -> ChallengeEval {
         match parse_moderator_challenges(www_authenticate) {
             Ok((_credential, act, moderator)) => {
-                let needs_redeem = self
-                    .pools
-                    .get(&act.policy_context)
-                    .map_or(true, |pool| pool.is_empty());
+                let needs_redeem =
+                    self.pools.get(&act.policy_context).map_or(true, |pool| pool.is_empty());
                 // Redemption needs an Endorsement from an Anchor in the
                 // accepted set. The epoch check happens in redeem_begin —
                 // the challenge carries only the key set, the epoch lives in
@@ -649,11 +632,8 @@ impl MoleBrowserClient {
         www_authenticate: &Vec<String>,
         commitment: &ModeratorCommitment,
     ) -> RedeemBegin {
-        let fail = |error: String| RedeemBegin {
-            ok: false,
-            error,
-            authorization_header: String::new(),
-        };
+        let fail =
+            |error: String| RedeemBegin { ok: false, error, authorization_header: String::new() };
 
         // Fail-closed: a Moderator with no registry entry cannot be redeemed
         // against.
@@ -694,8 +674,7 @@ impl MoleBrowserClient {
             return fail("challenge accepted set does not match the committed set".into());
         }
 
-        let directory: ModeratorDirectory = match serde_json::from_str(moderator_directory_json)
-        {
+        let directory: ModeratorDirectory = match serde_json::from_str(moderator_directory_json) {
             Ok(d) => d,
             Err(e) => return fail(format!("malformed moderator directory: {e}")),
         };
@@ -738,26 +717,18 @@ impl MoleBrowserClient {
             Ok(c) => c,
             Err(e) => return fail(format!("endorsement context encoding: {e}")),
         };
-        if !committed
-            .epochs
-            .iter()
-            .any(|e| e.bytes[..] == expected_context[..])
-        {
+        if !committed.epochs.iter().any(|e| e.bytes[..] == expected_context[..]) {
             return fail("redemption epoch is not committed".into());
         }
 
         // Find an Endorsement from an Anchor in the accepted set, granted in
         // the epoch the Moderator accepts.
-        let Some(index) =
-            self.usable_endorsement(&ihat_challenge, Some(&expected_context))
-        else {
+        let Some(index) = self.usable_endorsement(&ihat_challenge, Some(&expected_context)) else {
             return fail("no stored endorsement is usable against this challenge".into());
         };
         let endorsement = self.endorsements.swap_remove(index);
-        let Some(true_index) = ihat_challenge
-            .keys
-            .iter()
-            .position(|k| k[..] == endorsement.anchor_key[..])
+        let Some(true_index) =
+            ihat_challenge.keys.iter().position(|k| k[..] == endorsement.anchor_key[..])
         else {
             return fail("endorsement anchor left the accepted set".into());
         };
@@ -787,12 +758,9 @@ impl MoleBrowserClient {
         if batch == 0 || batch > 64 {
             return fail("issuance batch out of range".into());
         }
-        let pre_issuances: Vec<PreIssuance> =
-            (0..batch).map(|_| PreIssuance::random()).collect();
-        let issuance_requests: Vec<ActIssuanceRequestMsg> = pre_issuances
-            .iter()
-            .map(|pre| pre.request(&act_params))
-            .collect();
+        let pre_issuances: Vec<PreIssuance> = (0..batch).map(|_| PreIssuance::random()).collect();
+        let issuance_requests: Vec<ActIssuanceRequestMsg> =
+            pre_issuances.iter().map(|pre| pre.request(&act_params)).collect();
 
         let request = CredentialRequest {
             endorsement_type: endorsement_type::IHAT,
@@ -890,7 +858,11 @@ impl MoleBrowserClient {
         RedeemFinish { ok: true, error: String::new(), pool_size }
     }
 
-    fn present_begin(&mut self, www_authenticate: &Vec<String>) -> PresentBegin {
+    fn present_begin(
+        &mut self,
+        www_authenticate: &Vec<String>,
+        commitment: &ModeratorCommitment,
+    ) -> PresentBegin {
         let fail = |error: String| PresentBegin {
             ok: false,
             error,
@@ -898,18 +870,33 @@ impl MoleBrowserClient {
             authorization_header: String::new(),
         };
 
+        if !commitment.found {
+            return fail("moderator is not enrolled in the key-commitment registry".into());
+        }
+
         let (credential_challenge, act_challenge, _moderator_challenge) =
             match parse_moderator_challenges(www_authenticate) {
                 Ok(c) => c,
                 Err(e) => return fail(e),
             };
 
+        // The challenged amounts must be the policy's committed constants: a
+        // per-Client charge/topup would partition the anonymity set.
+        let Some(committed) = commitment
+            .policies
+            .iter()
+            .find(|p| p.policy_context[..] == act_challenge.policy_context[..])
+        else {
+            return fail("policy is not committed for this moderator".into());
+        };
+        if act_challenge.charge != committed.charge || act_challenge.topup != committed.topup {
+            return fail("challenged charge/topup are not the committed amounts".into());
+        }
+
         // Burn on use: the Credential leaves the pool before the request is
         // sent, and only its update-derived successor ever returns.
-        let Some(credential) = self
-            .pools
-            .get_mut(&act_challenge.policy_context)
-            .and_then(|pool| pool.pop_front())
+        let Some(credential) =
+            self.pools.get_mut(&act_challenge.policy_context).and_then(|pool| pool.pop_front())
         else {
             return fail("no credential pooled for this policy".into());
         };
@@ -983,8 +970,7 @@ impl MoleBrowserClient {
             Err(e) => return err_status(format!("malformed update: {e}")),
         };
         // An absent update means the Moderator consumed the Credential.
-        let Some(CredentialUpdate { credential_type: ct, update_response }) = update.update
-        else {
+        let Some(CredentialUpdate { credential_type: ct, update_response }) = update.update else {
             return ok_status();
         };
         if ct != credential_type::ACT {
@@ -1007,14 +993,11 @@ impl MoleBrowserClient {
             Ok(t) => t,
             Err(e) => return err_status(format!("update finalization failed: {e:?}")),
         };
-        self.pools
-            .entry(in_flight.policy_context)
-            .or_default()
-            .push_back(StoredCredential {
-                token,
-                act_public_key: in_flight.act_public_key,
-                act_params: in_flight.act_params,
-            });
+        self.pools.entry(in_flight.policy_context).or_default().push_back(StoredCredential {
+            token,
+            act_public_key: in_flight.act_public_key,
+            act_params: in_flight.act_params,
+        });
         ok_status()
     }
 
@@ -1132,7 +1115,8 @@ impl<'a> StateCursor<'a> {
 
 type RestoredState = (Vec<StoredEndorsement>, HashMap<Vec<u8>, VecDeque<StoredCredential>>);
 
-/// Parse a state blob, or `None` on any malformation (including trailing bytes).
+/// Parse a state blob, or `None` on any malformation (including trailing
+/// bytes).
 fn parse_state(bytes: &[u8]) -> Option<RestoredState> {
     let mut cur = StateCursor::new(bytes);
     if cur.u8()? != 1 {
@@ -1248,10 +1232,7 @@ impl TestMoleAnchor {
                 let mut session_id = vec![0u8; 16];
                 OsRng.fill_bytes(&mut session_id);
                 self.sessions.insert(session_id.clone(), pending);
-                IhatGrantResponse::Step1 {
-                    session_id,
-                    signature: signature.to_wire(),
-                }
+                IhatGrantResponse::Step1 { session_id, signature: signature.to_wire() }
             }
             IhatGrantRequest::Step2 { session_id, proof_request } => {
                 let Some(pending) = self.sessions.remove(&session_id) else {
@@ -1261,9 +1242,7 @@ impl TestMoleAnchor {
                     return http(400, b"malformed ProofRequest");
                 };
                 let proof = pending.prove(&proof_request);
-                IhatGrantResponse::Step2 {
-                    proof: proof.to_wire(),
-                }
+                IhatGrantResponse::Step2 { proof: proof.to_wire() }
             }
         };
 
@@ -1313,10 +1292,8 @@ fn new_test_moderator(
             key
         })
         .collect();
-    let accepted: Vec<IhatKey> = keys
-        .iter()
-        .map(|k| decode_anchor_key(k).expect("accepted anchor key decodes"))
-        .collect();
+    let accepted: Vec<IhatKey> =
+        keys.iter().map(|k| decode_anchor_key(k).expect("accepted anchor key decodes")).collect();
     let act_domain_separator = b"MoLE-components-test:act:v1".to_vec();
     let act_params = ActParams::from_domain_separator(&act_domain_separator);
     let act_key = ActPrivateKey::random();
@@ -1374,6 +1351,8 @@ impl TestMoleModerator {
                     .map(|k| Blob { bytes: k.to_vec() })
                     .collect(),
                 epochs: vec![Blob { bytes: self.endorsement_context.clone() }],
+                charge: self.charge,
+                topup: 0,
             }],
         }
     }
@@ -1499,10 +1478,7 @@ impl TestMoleModerator {
 
         // Recording the nullifier spends the Endorsement; it is the last
         // check.
-        if !self
-            .seen_endorsement_nullifiers
-            .insert(presentation.endorsement.nf.clone())
-        {
+        if !self.seen_endorsement_nullifiers.insert(presentation.endorsement.nf.clone()) {
             return self.reject();
         }
 
@@ -1522,8 +1498,7 @@ impl TestMoleModerator {
         if presentation.credential_type != credential_type::ACT {
             return self.challenge_response(String::new());
         }
-        let Ok(pau) =
-            ActPresentationAndUpdate::from_bytes(&presentation.presentation_and_update)
+        let Ok(pau) = ActPresentationAndUpdate::from_bytes(&presentation.presentation_and_update)
         else {
             return self.reject();
         };
@@ -1543,12 +1518,9 @@ impl TestMoleModerator {
             return self.reject();
         }
 
-        let Ok(refund) = self.act_key.refund(
-            &self.act_params,
-            &spend,
-            u128::from(self.refund),
-            BALANCE_DIGITS,
-        ) else {
+        let Ok(refund) =
+            self.act_key.refund(&self.act_params, &spend, u128::from(self.refund), BALANCE_DIGITS)
+        else {
             return self.reject();
         };
         if !self.seen_spend_nullifiers.insert(spend.k.to_bytes()) {
@@ -1558,10 +1530,8 @@ impl TestMoleModerator {
         let update = OptionalCredentialUpdate {
             update: Some(CredentialUpdate {
                 credential_type: credential_type::ACT,
-                update_response: ActUpdate {
-                    refund: refund.to_wire().expect("refund encodes"),
-                }
-                .to_bytes(),
+                update_response: ActUpdate { refund: refund.to_wire().expect("refund encodes") }
+                    .to_bytes(),
             }),
         };
         TestHttpResponse {

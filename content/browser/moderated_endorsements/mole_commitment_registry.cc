@@ -31,14 +31,16 @@ constexpr char kPolicyContextField[] = "policy-context";
 constexpr char kActPublicKeyField[] = "act-public-key";
 constexpr char kActDomainSeparatorField[] = "act-domain-separator";
 constexpr char kAcceptedAnchorKeysField[] = "accepted-anchor-keys";
+constexpr char kChargeField[] = "charge";
+constexpr char kTopupField[] = "topup";
 
 using Bytes = std::vector<uint8_t>;
 
 // base64url-without-padding, matching mole_core's wire encoding, into bytes.
 std::optional<Bytes> DecodeB64(const std::string& in) {
   std::string decoded;
-  if (!base::Base64UrlDecode(
-          in, base::Base64UrlDecodePolicy::DISALLOW_PADDING, &decoded)) {
+  if (!base::Base64UrlDecode(in, base::Base64UrlDecodePolicy::DISALLOW_PADDING,
+                             &decoded)) {
     return std::nullopt;
   }
   return Bytes(decoded.begin(), decoded.end());
@@ -182,6 +184,14 @@ bool MoleCommitmentRegistry::ParseAndSet(std::string_view json) {
         committed.policy_context = std::move(*pc);
         committed.act_public_key = std::move(*apk);
         committed.act_domain_separator = std::move(*ads);
+        // `charge` is required and must be non-negative; `topup` defaults to 0.
+        std::optional<int> charge = policy->FindInt(kChargeField);
+        std::optional<int> topup = policy->FindInt(kTopupField);
+        if (!charge || *charge < 0 || (topup && *topup < 0)) {
+          return false;
+        }
+        committed.charge = static_cast<uint64_t>(*charge);
+        committed.topup = static_cast<uint64_t>(topup.value_or(0));
         moderator.policies.push_back(std::move(committed));
       }
       moderators.insert_or_assign(std::move(origin), std::move(moderator));
@@ -224,6 +234,8 @@ MoleCommitmentRegistry::GetModeratorCommitment(
     p.act_domain_separator = ToRustVec(policy.act_domain_separator);
     p.accepted_anchor_keys = ToBlobs(policy.accepted_anchor_keys);
     p.epochs = ToBlobs(policy.epochs);
+    p.charge = policy.charge;
+    p.topup = policy.topup;
     out.policies.push_back(std::move(p));
   }
   return out;
