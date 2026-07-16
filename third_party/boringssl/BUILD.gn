@@ -95,6 +95,12 @@ if (enable_rust) {
 
     visibility = [
       ":*",  # private, should only be exposed through bssl_crypto
+
+      # The MoLE sigma-protocol layer needs raw P-256 group/scalar arithmetic
+      # (and, later, a Keccak-f1600 permutation) that bssl_crypto does not
+      # expose. Reviewed unsafe FFI, scoped to the one sigma target. NEEDS
+      # BORINGSSL OWNERS SIGN-OFF (precedent: the athm-pvt grant).
+      "//third_party/mole/sigma_boring:*",
     ]
 
     bindgen_deps = [ ":raw_bssl_sys_bindings" ]
@@ -179,6 +185,23 @@ component("boringssl") {
     ldflags = [ "-Wl,--version-script=" +
                 rebase_path(version_script, root_build_dir) ]
   }
+}
+
+# MoLE crypto exposure shim: re-exports BoringSSL's internal Keccak-f1600
+# permutation (and, later, EC_SCALAR arithmetic) under a stable ABI for the
+# MoLE sigma-protocol layer, which needs primitives bssl_crypto does not
+# expose. Scoped to that one consumer. NEEDS BORINGSSL OWNERS SIGN-OFF.
+source_set("mole_crypto_shim") {
+  visibility = [ "//third_party/mole/sigma_boring:*" ]
+  sources = [ "mole_keccak_shim.cc" ]
+  include_dirs = [
+    "src",
+    "src/include",
+  ]
+  configs += [ ":internal_config" ]
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+  deps = [ ":boringssl" ]
 }
 
 if (build_with_chromium) {
