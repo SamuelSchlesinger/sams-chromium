@@ -156,5 +156,41 @@ TEST(MoleClientHolderPersistenceTest, ClearAndResetWipesState) {
   }
 }
 
+// A browsing-data clear that removes cookies wipes the store; an unrelated
+// data type (local storage) leaves it intact.
+TEST(MoleClientHolderPersistenceTest, ClearsStoreOnCookieRemoval) {
+  BrowserTaskEnvironment task_environment;
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+  const std::string policy(kPolicy);
+
+  TestDeployment d = Deploy();
+
+  auto holder = std::make_unique<MoleClientHolder>(temp_dir.GetPath());
+  task_environment.RunUntilIdle();
+  ASSERT_TRUE(CollectEndorsement(holder->client(), *d.anchor));
+  ASSERT_EQ(RedeemAndIssue(holder->client(), *d.moderator), 4u);
+  ASSERT_EQ(holder->client().pool_size(AsSlice(policy)), 4u);
+
+  // OnStorageKeyDataCleared overrides a public interface method; reach it
+  // through the base pointer.
+  auto* observer =
+      static_cast<StoragePartition::DataRemovalObserver*>(holder.get());
+
+  // A non-cookie clear leaves the pool untouched.
+  observer->OnStorageKeyDataCleared(
+      StoragePartition::REMOVE_DATA_MASK_LOCAL_STORAGE,
+      StoragePartition::StorageKeyMatcherFunction(), base::Time(),
+      base::Time::Max());
+  EXPECT_EQ(holder->client().pool_size(AsSlice(policy)), 4u);
+
+  // A cookie clear drops the whole store.
+  observer->OnStorageKeyDataCleared(
+      StoragePartition::REMOVE_DATA_MASK_COOKIES,
+      StoragePartition::StorageKeyMatcherFunction(), base::Time(),
+      base::Time::Max());
+  EXPECT_EQ(holder->client().pool_size(AsSlice(policy)), 0u);
+}
+
 }  // namespace
 }  // namespace content

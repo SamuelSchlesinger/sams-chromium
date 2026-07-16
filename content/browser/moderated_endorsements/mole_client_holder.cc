@@ -72,6 +72,14 @@ MoleClientHolder& MoleClientHolder::GetOrCreate(
     auto owned = std::make_unique<MoleClientHolder>(browser_context->GetPath());
     holder = owned.get();
     browser_context->SetUserData(kMoleClientHolderKey, std::move(owned));
+    // Wipe the store when the user clears browsing data. We deliberately do
+    // NOT keep a ScopedObservation or RemoveObserver later: the default
+    // StoragePartition is destroyed during BrowserContext shutdown (before
+    // this SupportsUserData is), so removing at destruction would touch a
+    // freed partition. DataRemovalObserver is a base::CheckedObserver, so a
+    // destroyed holder self-invalidates and the ObserverList skips it — the
+    // registration needs no explicit teardown.
+    browser_context->GetDefaultStoragePartition()->AddObserver(holder);
   }
   return *holder;
 }
@@ -92,6 +100,20 @@ void MoleClientHolder::ClearAndReset() {
   client_ = moderated_endorsements::new_mole_browser_client();
   // Persist the now-empty state, overwriting the on-disk blob.
   SchedulePersist();
+}
+
+void MoleClientHolder::OnStorageKeyDataCleared(
+    uint32_t remove_mask,
+    StoragePartition::StorageKeyMatcherFunction storage_key_matcher,
+    base::Time begin,
+    base::Time end) {
+  // Cookies carry the Anchor session the endorsement derives from, so a
+  // cookie clear must take the derived credentials with it. The store is
+  // unlinkable and cross-site (see the header), so it is cleared as a unit,
+  // ignoring the per-key matcher and time range.
+  if (remove_mask & StoragePartition::REMOVE_DATA_MASK_COOKIES) {
+    ClearAndReset();
+  }
 }
 
 base::ImportantFileWriter::BackgroundDataProducerCallback

@@ -14,8 +14,10 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/supports_user_data.h"
+#include "base/time/time.h"
 #include "components/moderated_endorsements/mole_ffi.rs.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/storage_partition.h"
 
 namespace base {
 class SequencedTaskRunner;
@@ -32,10 +34,12 @@ class BrowserContext;
 // asynchronously at construction. Because endorsements collected on one site
 // answer challenges on another, this state is BrowserContext-wide (not scoped
 // to a StorageKey); it is dropped on a full browsing-data clear via
-// ClearAndReset().
+// ClearAndReset(), driven by observing the default StoragePartition's data
+// removal (see OnStorageKeyDataCleared).
 class CONTENT_EXPORT MoleClientHolder
     : public base::SupportsUserData::Data,
-      public base::ImportantFileWriter::BackgroundDataSerializer {
+      public base::ImportantFileWriter::BackgroundDataSerializer,
+      public StoragePartition::DataRemovalObserver {
  public:
   explicit MoleClientHolder(const base::FilePath& profile_path);
   MoleClientHolder(const MoleClientHolder&) = delete;
@@ -68,6 +72,18 @@ class CONTENT_EXPORT MoleClientHolder
   std::vector<base::OnceClosure> pool_waiters;
 
  private:
+  // StoragePartition::DataRemovalObserver: a browsing-data clear that removes
+  // cookies wipes the whole MoLE store. MoLE credentials are unlinkable,
+  // cross-site material with no owning StorageKey, so they cannot be cleared
+  // selectively; any cookie clear conservatively drops all of it (fail-closed
+  // — the user re-collects endorsements as needed). `storage_key_matcher`,
+  // `begin`, and `end` are therefore not consulted.
+  void OnStorageKeyDataCleared(
+      uint32_t remove_mask,
+      StoragePartition::StorageKeyMatcherFunction storage_key_matcher,
+      base::Time begin,
+      base::Time end) override;
+
   // base::ImportantFileWriter::BackgroundDataSerializer: snapshots the state on
   // the calling (UI) thread and returns a producer that pushes the bytes on the
   // background sequence.
