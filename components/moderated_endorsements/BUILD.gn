@@ -17,9 +17,8 @@ rust_static_library("mole_ffi") {
   edition = "2021"
   deps = [
     "//third_party/mole:mole_core",
-    "//third_party/mole/act_boring:act_boring",
-    "//third_party/mole/ihat_boring:ihat_boring",
-    "//third_party/rust/curve25519_dalek/v4:lib",
+    "//third_party/mole/act_boring",
+    "//third_party/mole/ihat_boring",
     "//third_party/rust/rand_core/v0_6:lib",
     "//third_party/rust/serde_json/v1:lib",
   ]
@@ -47,8 +46,8 @@ test("mole_unittests") {
 
     # Keeps the sigma_boring differential tests in the build graph so they are
     # built and reachable (temporary wiring while that crate is standalone).
-    "//third_party/mole/sigma_boring:sigma_boring_unittests",
-    "//third_party/mole/ihat_boring:ihat_boring_unittests",
     "//third_party/mole/act_boring:act_boring_unittests",
+    "//third_party/mole/ihat_boring:ihat_boring_unittests",
+    "//third_party/mole/sigma_boring:sigma_boring_unittests",
   ]
 }

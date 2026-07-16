@@ -62,7 +62,7 @@ pub struct ModeratorPolicy {
     /// The credential type (0x0001 for ACT).
     #[serde(rename = "credential-type")]
     pub credential_type: u16,
-    /// The ACT public key (32-byte compressed Ristretto point), base64url.
+    /// The ACT public key (SEC1-compressed P-256 point), base64url.
     #[serde(rename = "act-public-key")]
     pub act_public_key: String,
     /// The ACT domain separator these keys operate under, base64url. Both
