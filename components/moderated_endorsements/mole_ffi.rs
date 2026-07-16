@@ -53,7 +53,7 @@ use mole_core::messages::{
 };
 use mole_core::wire::Wire;
 use mole_core::{challenge_digest, credential_type, endorsement_type};
-use rand_core::{OsRng, RngCore};
+use sigma_boring::fill_random;
 
 /// ACT(P-256) parameters. The digit count `D` is applied per-operation
 /// (`issue`, `prove_spend`, `refund`) rather than carried in the type.
@@ -486,7 +486,7 @@ impl MoleBrowserClient {
 
         // The nullifier is Client-chosen and never seen by the Anchor.
         let mut nf = [0u8; 32];
-        OsRng.fill_bytes(&mut nf);
+        fill_random(&mut nf);
         let (signature_request, pending) =
             ClientNeedsSignature::request(nf.to_vec(), endorsement_context.clone());
         let Ok(signature_request_bytes) = signature_request.to_wire() else {
@@ -1230,7 +1230,7 @@ impl TestMoleAnchor {
                 }
                 let (signature, pending) = sig_request.sign(&self.key);
                 let mut session_id = vec![0u8; 16];
-                OsRng.fill_bytes(&mut session_id);
+                fill_random(&mut session_id);
                 self.sessions.insert(session_id.clone(), pending);
                 IhatGrantResponse::Step1 { session_id, signature: signature.to_wire() }
             }

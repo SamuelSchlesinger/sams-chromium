@@ -104,6 +104,18 @@ unsafe extern "C" {
     fn MOLE_p256_scalar_random(out: *mut u8) -> i32;
 }
 
+/// Fill `buf` with cryptographically secure random bytes from BoringSSL's
+/// CSPRNG (`RAND_bytes`). This is the same OS-seeded generator `getrandom`
+/// draws from, so the whole crypto runtime stays on BoringSSL with no
+/// `rand_core`/`getrandom` dependency. Aborts only on RNG failure, which
+/// BoringSSL documents as impossible on a correctly configured system.
+pub fn fill_random(buf: &mut [u8]) {
+    // SAFETY: `buf` is a valid, writable slice of exactly `buf.len()` bytes,
+    // which is what RAND_bytes writes.
+    let ok = unsafe { bssl_sys::RAND_bytes(buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(ok, 1, "RAND_bytes failed");
+}
+
 /// A P-256 scalar (mod the group order `n`), held as 32 canonical big-endian
 /// bytes (always `< n`). Fixed-width and `Copy`: the secret-dependent
 /// arithmetic runs in constant time through the BoringSSL EC_SCALAR shim, with
