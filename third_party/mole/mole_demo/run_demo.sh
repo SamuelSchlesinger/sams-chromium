@@ -62,6 +62,16 @@ echo "== starting shoes.com (:8082) and socks.com (:8083) =="
 # passes (everything else is fail-closed). Keyed by serialized origin.
 COMMITMENTS="{\"anchors\":{\"http://anchor.com\":$ANCHOR_COMMITMENT},\"moderators\":{\"http://antifraud.com\":$MOD_COMMITMENT}}"
 
+# macOS: an incremental relink can break the .app's ad-hoc signature ("code has
+# no resources…"), which makes macOS refuse to launch it. Re-sign defensively.
+if [[ "$(uname)" == "Darwin" && "$BROWSER" == *".app/"* ]]; then
+  APP_BUNDLE="${BROWSER%%.app/*}.app"
+  xattr -dr com.apple.provenance "$APP_BUNDLE" 2>/dev/null || true
+  codesign --force --sign - \
+    "$APP_BUNDLE"/Contents/Frameworks/*.framework/Versions/Current 2>/dev/null || true
+  codesign --force --sign - "$APP_BUNDLE" 2>/dev/null || true
+fi
+
 echo "== launching browser =="
 echo "   Visit anchor.com -> Get endorsement, then shoes.com / socks.com -> Verify,"
 echo "   and watch antifraud.com's counters (1 redemption, N unlinkable presentations)."
