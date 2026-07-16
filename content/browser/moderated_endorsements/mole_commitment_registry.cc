@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "base/base64url.h"
+#include "base/command_line.h"
 #include "base/json/json_reader.h"
 #include "base/no_destructor.h"
 #include "base/values.h"
@@ -18,6 +19,12 @@
 namespace content {
 
 namespace {
+
+// Dev/test override: inline registry JSON supplied on the command line, so a
+// deployment without the published component (e.g. content_shell demos, tests)
+// can still enroll Anchors and Moderators. Mirrors Private State Tokens'
+// --additional-trust-token-key-commitments.
+constexpr char kMoleKeyCommitmentsSwitch[] = "mole-key-commitments";
 
 // Top-level sections.
 constexpr char kAnchorsField[] = "anchors";
@@ -107,7 +114,17 @@ MoleCommitmentRegistry& MoleCommitmentRegistry::GetInstance() {
   return *instance;
 }
 
-MoleCommitmentRegistry::MoleCommitmentRegistry() = default;
+MoleCommitmentRegistry::MoleCommitmentRegistry() {
+  // Seed from the command-line override, if present. The component updater
+  // overwrites this later via SetMoleKeyCommitments once a signed component is
+  // delivered.
+  const base::CommandLine* command_line =
+      base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch(kMoleKeyCommitmentsSwitch)) {
+    ParseAndSet(command_line->GetSwitchValueASCII(kMoleKeyCommitmentsSwitch));
+  }
+}
+
 MoleCommitmentRegistry::~MoleCommitmentRegistry() = default;
 
 bool MoleCommitmentRegistry::ParseAndSet(std::string_view json) {
