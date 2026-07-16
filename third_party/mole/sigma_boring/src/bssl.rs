@@ -116,6 +116,7 @@ pub fn fill_random(buf: &mut [u8]) {
     assert_eq!(ok, 1, "RAND_bytes failed");
 }
 
+
 /// A P-256 scalar (mod the group order `n`), held as 32 canonical big-endian
 /// bytes (always `< n`). Fixed-width and `Copy`: the secret-dependent
 /// arithmetic runs in constant time through the BoringSSL EC_SCALAR shim, with
@@ -307,8 +308,10 @@ impl Scalar {
 // RFC 9380 expand_message_xmd over BoringSSL SHA-256.
 // ---------------------------------------------------------------------------
 
-/// One-shot SHA-256 via BoringSSL.
-fn sha256(input: &[u8]) -> [u8; 32] {
+/// One-shot SHA-256 via BoringSSL. Byte-identical to the `sha2` crate, so the
+/// MoLE glue computes key ids and challenge digests on BoringSSL with no
+/// RustCrypto `sha2`/`digest`/`typenum` dependency.
+pub fn sha256(input: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     // SAFETY: SHA256 writes 32 bytes to `out` and reads `input.len()` from
     // `input`; both buffers are valid for those spans.

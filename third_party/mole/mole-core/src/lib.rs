@@ -66,8 +66,5 @@ pub mod credential_type {
 /// redemption and presentation is bound to the digest of the challenge that
 /// triggered it.
 pub fn challenge_digest(challenge_encoding: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&Sha256::digest(challenge_encoding));
-    out
+    sigma_boring::sha256(challenge_encoding)
 }

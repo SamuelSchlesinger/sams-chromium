@@ -36,10 +36,10 @@ rust_static_library("mole_core") {
 
   rustflags = [ "--cap-lints=allow" ]
   deps = [
+    "//third_party/mole/sigma_boring",
     "//third_party/rust/base64/v0_22:lib",
     "//third_party/rust/serde/v1:lib",
     "//third_party/rust/serde_json/v1:lib",
-    "//third_party/rust/sha2/v0_10:lib",
     "//third_party/rust/thiserror/v2:lib",
   ]
 }

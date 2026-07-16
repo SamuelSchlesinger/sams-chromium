@@ -15,6 +15,6 @@ pub mod keccak;
 pub mod linear_relation;
 pub mod shake;
 
-pub use bssl::{fill_random, Point, Scalar, POINT_BYTES, SCALAR_BYTES};
+pub use bssl::{fill_random, sha256, Point, Scalar, POINT_BYTES, SCALAR_BYTES};
 pub use keccak::keccak_f1600;
 pub use shake::Transcript;

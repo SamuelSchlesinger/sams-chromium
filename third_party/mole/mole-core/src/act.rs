@@ -16,13 +16,11 @@ pub const BALANCE_DIGITS: usize = 8;
 /// encoding. Carried in full in `PresentationAndUpdate` and truncated to its
 /// final byte in `IssuanceRequest`, following the Privacy Pass convention.
 pub fn key_id(public_key_bytes: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"MoLE-ACT:key-id:v1");
-    hasher.update(public_key_bytes);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&hasher.finalize());
-    out
+    const DST: &[u8] = b"MoLE-ACT:key-id:v1";
+    let mut input = Vec::with_capacity(DST.len() + public_key_bytes.len());
+    input.extend_from_slice(DST);
+    input.extend_from_slice(public_key_bytes);
+    sigma_boring::sha256(&input)
 }
 
 /// The truncated key identifier: the final byte of [`key_id`].
