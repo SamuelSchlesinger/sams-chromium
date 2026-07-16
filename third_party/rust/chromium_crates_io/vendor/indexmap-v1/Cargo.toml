@@ -1,0 +1,39 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from `tools/crates/gnrt/removed_Cargo.toml.hbs`
+# by `tools/crates/run_gnrt.py vendor`. Do not edit!
+#
+# This is an empty placeholder that has replaced the
+# `indexmap-1.9.3` crate.
+#
+# See `//tools/crates/gnrt/removed_crate.md` to learn more.
+
+[package]
+name = "indexmap"
+version = "1.9.3"
+
+[package.metadata.gnrt]
+is_placeholder = true
+
+[features]
+"arbitrary" = []
+"quickcheck" = []
+"rayon" = []
+"rustc-rayon" = []
+"serde" = []
+"serde-1" = []
+"std" = []
+"test_debug" = []
+"test_low_transition_point" = []
+
+[dependencies.autocfg]
+version = "^1"
+default_features = false
+[dependencies.hashbrown]
+version = "^0.12"
+default_features = false
+[dependencies.serde]
+version = "^1.0"
+default_features = false

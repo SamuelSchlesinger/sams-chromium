@@ -1,0 +1,159 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from third_party/rust/chromium_crates_io/BUILD.gn.hbs by
+# tools/crates/gnrt.
+# Do not edit!
+
+import("//build/rust/cargo_crate.gni")
+
+cargo_crate("lib") {
+  crate_name = "crypto_bigint"
+  epoch = "0.5"
+  crate_type = "rlib"
+  crate_root = "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/lib.rs"
+  sources = [
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/array.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/boxed.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/boxed/uint.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/boxed/uint/add.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/boxed/uint/cmp.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/checked.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/ct_choice.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/lib.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/add.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/bit_and.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/bit_not.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/bit_or.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/bit_xor.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/bits.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/cmp.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/encoding.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/from.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/mul.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/neg.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/rand.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/shl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/shr.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/limb/sub.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/macros.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/non_zero.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/traits.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/add.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/add_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/array.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/bit_and.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/bit_not.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/bit_or.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/bit_xor.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/bits.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/cmp.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/concat.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/div.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/div_limb.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/encoding.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/encoding/der.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/encoding/rlp.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/extra_sizes.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/from.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/inv_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/macros.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/add.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/const_add.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/const_inv.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/const_mul.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/const_neg.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/const_pow.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/const_sub.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/constant_mod/macros.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/div_by_2.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/inv.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/mul.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/pow.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/reduction.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod/runtime_add.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod/runtime_inv.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod/runtime_mul.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod/runtime_neg.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod/runtime_pow.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/runtime_mod/runtime_sub.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/modular/sub.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/mul.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/mul_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/neg.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/neg_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/rand.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/resize.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/shl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/shr.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/split.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/sqrt.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/sub.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/uint/sub_mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/wrapping.rs",
+  ]
+  inputs = [ "//third_party/rust/chromium_crates_io/vendor/crypto-bigint-v0_5/src/../README.md" ]
+
+  build_native_rust_unit_tests = false
+  edition = "2021"
+  cargo_pkg_authors = "RustCrypto Developers"
+  cargo_pkg_name = "crypto-bigint"
+  cargo_pkg_description = "Pure Rust implementation of a big integer library which has been designed from the ground-up for use in cryptographic applications. Provides constant-time, no_std-friendly implementations of modern formulas using const generics."
+  cargo_pkg_repository = "https://github.com/RustCrypto/crypto-bigint"
+  cargo_pkg_version = "0.5.5"
+
+  allow_unsafe = true
+
+  deps = [
+    "//third_party/rust/generic_array/v0_14:lib",
+    "//third_party/rust/rand_core/v0_6:lib",
+    "//third_party/rust/subtle/v2:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+  features = [
+    "generic-array",
+    "rand_core",
+    "zeroize",
+  ]
+
+  # Only for usage from third-party crates. Add the crate to
+  # //third_party/rust/chromium_crates_io/Cargo.toml to use
+  # it from first-party code.
+  visibility = [ "//third_party/rust/*" ]
+
+  #####################################################################
+  # Tweaking which GN `config`s apply to this target.
+
+  # Config changes that apply to all `//third_party/rust` crates.
+  _configs_to_remove = [
+    # We don't need code coverage data for any `chromium_crates_io` crates.
+    "//build/config/coverage:default_coverage",
+
+    # This is third-party code, so remove `chromium_code` config.  We are not
+    # at the same time adding `//build/config/compiler:no_chromium_code`,
+    # because 1) we don't want to pull how warnings are handled by that config
+    # and 2) that config doesn't have any non-warnings-related stuff.
+    "//build/config/compiler:chromium_code",
+  ]
+  _configs_to_add = []
+
+  # Changing (if needed) which configs apply to this specific crate (based on
+  # `extra_kv.configs_to_remove` and `extra_kv.configs_to_add` from
+  # `gnrt_config.toml`).
+  _configs_to_remove += []
+  _configs_to_add += []
+
+  # Applying config changes.
+  library_configs -= _configs_to_remove
+  library_configs += _configs_to_add
+  executable_configs -= _configs_to_remove
+  executable_configs += _configs_to_add
+  proc_macro_configs -= _configs_to_remove
+  proc_macro_configs += _configs_to_add
+}

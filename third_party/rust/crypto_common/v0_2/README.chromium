@@ -1,0 +1,11 @@
+Name: crypto-common
+URL: https://crates.io/crates/crypto-common
+Version: 0.2.2
+Revision: 93dee26c6bde3741a197f1c5f6b7baac277705f3
+Update Mechanism: Manual (https://crbug.com/449898466)
+License: Apache-2.0
+License File: //third_party/rust/chromium_crates_io/vendor/crypto-common-v0_2/LICENSE-APACHE
+Shipped: yes
+Security Critical: yes
+
+Description: Common traits used by cryptographic algorithms

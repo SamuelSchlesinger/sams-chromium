@@ -1,0 +1,112 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from third_party/rust/chromium_crates_io/BUILD.gn.hbs by
+# tools/crates/gnrt.
+# Do not edit!
+
+import("//build/rust/cargo_crate.gni")
+
+cargo_crate("lib") {
+  crate_name = "elliptic_curve"
+  epoch = "0.13"
+  crate_type = "rlib"
+  crate_root = "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/lib.rs"
+  sources = [
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/arithmetic.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/dev.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/ecdh.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/error.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/field.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/group_digest.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/hash2field.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/hash2field/expand_msg.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/hash2field/expand_msg/xmd.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/hash2field/expand_msg/xof.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/isogeny.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/map2curve.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/hash2curve/osswu.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/jwk.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/lib.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/ops.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/point.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/point/non_identity.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/public_key.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/scalar.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/scalar/blinded.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/scalar/nonzero.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/scalar/primitive.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/sec1.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/secret_key.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/secret_key/pkcs8.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/voprf.rs",
+    "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/weierstrass.rs",
+  ]
+  inputs = [ "//third_party/rust/chromium_crates_io/vendor/elliptic-curve-v0_13/src/../README.md" ]
+
+  build_native_rust_unit_tests = false
+  edition = "2021"
+  cargo_pkg_authors = "RustCrypto Developers"
+  cargo_pkg_name = "elliptic-curve"
+  cargo_pkg_description = "General purpose Elliptic Curve Cryptography (ECC) support, including types and traits for representing various elliptic curve forms, scalars, points, and public/secret keys composed thereof."
+  cargo_pkg_repository =
+      "https://github.com/RustCrypto/traits/tree/master/elliptic-curve"
+  cargo_pkg_version = "0.13.8"
+
+  allow_unsafe = false
+
+  deps = [
+    "//third_party/rust/base16ct/v0_2:lib",
+    "//third_party/rust/crypto_bigint/v0_5:lib",
+    "//third_party/rust/digest/v0_10:lib",
+    "//third_party/rust/ff/v0_13:lib",
+    "//third_party/rust/generic_array/v0_14:lib",
+    "//third_party/rust/group/v0_13:lib",
+    "//third_party/rust/rand_core/v0_6:lib",
+    "//third_party/rust/sec1/v0_7:lib",
+    "//third_party/rust/subtle/v2:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+  features = [
+    "arithmetic",
+    "default",
+    "digest",
+    "ff",
+    "group",
+    "hash2curve",
+    "hazmat",
+    "sec1",
+  ]
+
+  #####################################################################
+  # Tweaking which GN `config`s apply to this target.
+
+  # Config changes that apply to all `//third_party/rust` crates.
+  _configs_to_remove = [
+    # We don't need code coverage data for any `chromium_crates_io` crates.
+    "//build/config/coverage:default_coverage",
+
+    # This is third-party code, so remove `chromium_code` config.  We are not
+    # at the same time adding `//build/config/compiler:no_chromium_code`,
+    # because 1) we don't want to pull how warnings are handled by that config
+    # and 2) that config doesn't have any non-warnings-related stuff.
+    "//build/config/compiler:chromium_code",
+  ]
+  _configs_to_add = []
+
+  # Changing (if needed) which configs apply to this specific crate (based on
+  # `extra_kv.configs_to_remove` and `extra_kv.configs_to_add` from
+  # `gnrt_config.toml`).
+  _configs_to_remove += []
+  _configs_to_add += []
+
+  # Applying config changes.
+  library_configs -= _configs_to_remove
+  library_configs += _configs_to_add
+  executable_configs -= _configs_to_remove
+  executable_configs += _configs_to_add
+  proc_macro_configs -= _configs_to_remove
+  proc_macro_configs += _configs_to_add
+}

@@ -1,0 +1,102 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from third_party/rust/chromium_crates_io/BUILD.gn.hbs by
+# tools/crates/gnrt.
+# Do not edit!
+
+import("//build/rust/cargo_crate.gni")
+
+cargo_crate("lib") {
+  crate_name = "spongefish"
+  epoch = "0.7"
+  crate_type = "rlib"
+  crate_root =
+      "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/lib.rs"
+  sources = [
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/codecs.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/domain_separator.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/ark_ec_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/ark_ff_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/bls12_381_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/curve25519_dalek_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/p256_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/p3_baby_bear.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/p3_koala_bear.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/p3_mersenne31.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/risc0_zkp_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/secp256k1_impl.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/drivers/tests.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/duplex_sponge.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/error.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/instantiations/hash.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/instantiations/mod.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/instantiations/permutations.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/instantiations/tests.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/instantiations/xof.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/io.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/lib.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/narg_prover.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/narg_verifier.rs",
+    "//third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/src/tests.rs",
+  ]
+  inputs = []
+
+  build_native_rust_unit_tests = false
+  edition = "2021"
+  cargo_pkg_authors =
+      "Michele Orrù <m@orru.net>, Giacomo Fenzi <giacomofenzi@outlook.com>"
+  cargo_pkg_name = "spongefish"
+  cargo_pkg_description = "An implementation of the Fiat--Shamir transformation from Duplex Sponges."
+  cargo_pkg_repository = "https://github.com/arkworks-rs/spongefish"
+  cargo_pkg_version = "0.7.0"
+
+  allow_unsafe = true
+
+  deps = [
+    "//third_party/rust/curve25519_dalek/v4:lib",
+    "//third_party/rust/digest/v0_11:lib",
+    "//third_party/rust/rand/v0_8:lib",
+    "//third_party/rust/sha3/v0_11:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+  features = [
+    "curve25519-dalek",
+    "default",
+    "sha3",
+    "std",
+    "zeroize",
+  ]
+
+  #####################################################################
+  # Tweaking which GN `config`s apply to this target.
+
+  # Config changes that apply to all `//third_party/rust` crates.
+  _configs_to_remove = [
+    # We don't need code coverage data for any `chromium_crates_io` crates.
+    "//build/config/coverage:default_coverage",
+
+    # This is third-party code, so remove `chromium_code` config.  We are not
+    # at the same time adding `//build/config/compiler:no_chromium_code`,
+    # because 1) we don't want to pull how warnings are handled by that config
+    # and 2) that config doesn't have any non-warnings-related stuff.
+    "//build/config/compiler:chromium_code",
+  ]
+  _configs_to_add = []
+
+  # Changing (if needed) which configs apply to this specific crate (based on
+  # `extra_kv.configs_to_remove` and `extra_kv.configs_to_add` from
+  # `gnrt_config.toml`).
+  _configs_to_remove += []
+  _configs_to_add += []
+
+  # Applying config changes.
+  library_configs -= _configs_to_remove
+  library_configs += _configs_to_add
+  executable_configs -= _configs_to_remove
+  executable_configs += _configs_to_add
+  proc_macro_configs -= _configs_to_remove
+  proc_macro_configs += _configs_to_add
+}

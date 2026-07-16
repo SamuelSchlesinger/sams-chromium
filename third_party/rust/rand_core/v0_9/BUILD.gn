@@ -32,7 +32,7 @@ cargo_crate("lib") {
   cargo_pkg_repository = "https://github.com/rust-random/rand"
   cargo_pkg_version = "0.9.5"
 
-  allow_unsafe = false
+  allow_unsafe = true
 
   # Only for usage from third-party crates. Add the crate to
   # //third_party/rust/chromium_crates_io/Cargo.toml to use

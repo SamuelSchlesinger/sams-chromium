@@ -1,0 +1,33 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from `tools/crates/gnrt/removed_Cargo.toml.hbs`
+# by `tools/crates/run_gnrt.py vendor`. Do not edit!
+#
+# This is an empty placeholder that has replaced the
+# `p3-symmetric-0.5.3` crate.
+#
+# See `//tools/crates/gnrt/removed_crate.md` to learn more.
+
+[package]
+name = "p3-symmetric"
+version = "0.5.3"
+
+[package.metadata.gnrt]
+is_placeholder = true
+
+[features]
+
+[dependencies.itertools]
+version = "^0.14.0"
+default_features = false
+[dependencies.p3-field]
+version = "^0.5.3"
+default_features = false
+[dependencies.p3-util]
+version = "^0.5.3"
+default_features = false
+[dependencies.serde]
+version = "^1.0"
+default_features = false

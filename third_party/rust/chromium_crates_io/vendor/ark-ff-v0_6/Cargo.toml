@@ -1,0 +1,53 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from `tools/crates/gnrt/removed_Cargo.toml.hbs`
+# by `tools/crates/run_gnrt.py vendor`. Do not edit!
+#
+# This is an empty placeholder that has replaced the
+# `ark-ff-0.6.0` crate.
+#
+# See `//tools/crates/gnrt/removed_crate.md` to learn more.
+
+[package]
+name = "ark-ff"
+version = "0.6.0"
+
+[package.metadata.gnrt]
+is_placeholder = true
+
+[features]
+"asm" = []
+"default" = []
+"parallel" = []
+"rayon" = []
+"std" = []
+
+[dependencies.ark-ff-asm]
+version = "^0.6.0"
+default_features = false
+[dependencies.ark-ff-macros]
+version = "^0.6.0"
+default_features = false
+[dependencies.ark-serialize]
+version = "^0.6.0"
+default_features = false
+[dependencies.ark-std]
+version = "^0.6.0"
+default_features = false
+[dependencies.digest]
+version = "^0.10"
+default_features = false
+[dependencies.educe]
+version = "^0.6.0"
+default_features = false
+[dependencies.num-bigint]
+version = "^0.4"
+default_features = false
+[dependencies.num-traits]
+version = "^0.2"
+default_features = false
+[dependencies.zeroize]
+version = "^1"
+default_features = false

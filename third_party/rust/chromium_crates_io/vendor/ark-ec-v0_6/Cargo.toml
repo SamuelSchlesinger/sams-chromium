@@ -1,0 +1,64 @@
+# Copyright 2023 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# @generated from `tools/crates/gnrt/removed_Cargo.toml.hbs`
+# by `tools/crates/run_gnrt.py vendor`. Do not edit!
+#
+# This is an empty placeholder that has replaced the
+# `ark-ec-0.6.0` crate.
+#
+# See `//tools/crates/gnrt/removed_crate.md` to learn more.
+
+[package]
+name = "ark-ec"
+version = "0.6.0"
+
+[package.metadata.gnrt]
+is_placeholder = true
+
+[features]
+"default" = []
+"parallel" = []
+"rayon" = []
+"std" = []
+
+[dependencies.ahash]
+version = "^0.8"
+default_features = false
+[dependencies.ark-ff]
+version = "^0.6.0"
+default_features = false
+[dependencies.ark-poly]
+version = "^0.6.0"
+default_features = false
+[dependencies.ark-serialize]
+version = "^0.6.0"
+default_features = false
+[dependencies.ark-std]
+version = "^0.6.0"
+default_features = false
+[dependencies.educe]
+version = "^0.6.0"
+default_features = false
+[dependencies.fnv]
+version = "^1.0"
+default_features = false
+[dependencies.hashbrown]
+version = "^0.17"
+default_features = false
+[dependencies.itertools]
+version = "^0.14"
+default_features = false
+[dependencies.num-bigint]
+version = "^0.4"
+default_features = false
+[dependencies.num-integer]
+version = "^0.1"
+default_features = false
+[dependencies.num-traits]
+version = "^0.2"
+default_features = false
+[dependencies.zeroize]
+version = "^1"
+default_features = false

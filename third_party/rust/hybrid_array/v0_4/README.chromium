@@ -1,0 +1,14 @@
+Name: hybrid-array
+URL: https://crates.io/crates/hybrid-array
+Version: 0.4.13
+Revision: e9042b5de62fd29b5bfdbd2c3873731a131c446f
+Update Mechanism: Manual (https://crbug.com/449898466)
+License: Apache-2.0
+License File: //third_party/rust/chromium_crates_io/vendor/hybrid-array-v0_4/LICENSE-APACHE
+Shipped: yes
+Security Critical: yes
+
+Description: Hybrid typenum-based and const generic array types designed to provide the
+flexibility of typenum-based expressions while also allowing interoperability
+and a transition path to const generics
+
