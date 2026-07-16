@@ -2782,6 +2782,7 @@ test("content_unittests") {
     "../browser/metrics/histogram_shared_memory_config_unittest.cc",
     "../browser/metrics/histograms_monitor_unittest.cc",
     "../browser/moderated_endorsements/mole_client_holder_unittest.cc",
+    "../browser/moderated_endorsements/mole_commitment_registry_unittest.cc",
     "../browser/mojo_binder_policy_applier_unittest.cc",
     "../browser/mojo_binder_policy_map_impl_unittest.cc",
     "../browser/network/cross_origin_embedder_policy_reporter_unittest.cc",

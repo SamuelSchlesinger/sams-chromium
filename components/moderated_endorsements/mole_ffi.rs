@@ -140,6 +140,42 @@ mod ffi {
         bytes: Vec<u8>,
     }
 
+    /// The committed parameters the browser's key-commitment registry (a
+    /// component-updater component, delivered identically to every browser to
+    /// defeat split-view) authorizes for one Anchor origin. Grant enforcement
+    /// refuses any endorsement whose key or epoch is not committed here; this
+    /// denies the "unique key/epoch per user" cross-site tagging channel.
+    /// `found == false` means the origin is not enrolled, so the grant is
+    /// refused outright (fail-closed).
+    struct AnchorCommitment {
+        found: bool,
+        /// Committed Anchor IHAT public keys (33-byte SEC1-compressed P-256).
+        keys: Vec<Blob>,
+        /// Committed endorsement contexts (epochs). The Anchor's advertised
+        /// epoch must be one of these, so an epoch cannot carry a per-user id.
+        epochs: Vec<Blob>,
+    }
+
+    /// One committed Moderator policy: the exact values a redemption for this
+    /// policy must match. `accepted_anchor_keys` is the WHOLE committed set in
+    /// normative order; a redemption's accepted set must equal it exactly (no
+    /// server-chosen subset), which denies the accepted-set partitioning
+    /// channel (including singleton-set deanonymization).
+    struct CommittedPolicy {
+        policy_context: Vec<u8>,
+        act_public_key: Vec<u8>,
+        act_domain_separator: Vec<u8>,
+        accepted_anchor_keys: Vec<Blob>,
+        epochs: Vec<Blob>,
+    }
+
+    /// The committed policies the registry authorizes for one Moderator origin.
+    /// `found == false` ⇒ not enrolled ⇒ redemption refused (fail-closed).
+    struct ModeratorCommitment {
+        found: bool,
+        policies: Vec<CommittedPolicy>,
+    }
+
     /// An HTTP exchange as the in-process test servers see it: a status, the
     /// header values that matter to the protocol, and a body.
     struct TestHttpResponse {
@@ -157,10 +193,13 @@ mod ffi {
         fn new_mole_browser_client() -> Box<MoleBrowserClient>;
 
         /// Start an endorsement grant against the Anchor whose directory
-        /// (the `/.well-known/mole-anchor` JSON) is given.
+        /// (the `/.well-known/mole-anchor` JSON) is given. `commitment` is the
+        /// registry's committed parameters for the Anchor's origin; the grant
+        /// is refused unless the advertised key and epoch are both committed.
         fn grant_begin(
             self: &mut MoleBrowserClient,
             anchor_directory_json: &str,
+            commitment: &AnchorCommitment,
         ) -> GrantBegin;
 
         /// Consume a grant-exchange response body; see [`GrantStep`].
@@ -179,6 +218,7 @@ mod ffi {
             self: &mut MoleBrowserClient,
             moderator_directory_json: &str,
             www_authenticate: &Vec<String>,
+            commitment: &ModeratorCommitment,
         ) -> RedeemBegin;
 
         /// Finalize Redeem & Issue from the response's `Mole-Credential`
@@ -229,6 +269,9 @@ mod ffi {
         fn new_test_anchor(endorsement_context: &[u8]) -> Box<TestMoleAnchor>;
         fn anchor_directory_json(self: &TestMoleAnchor) -> String;
         fn anchor_public_key(self: &TestMoleAnchor) -> Vec<u8>;
+        /// The registry entry this Anchor would publish: its key and epoch.
+        /// Used to drive the enforcement in tests as a real registry would.
+        fn anchor_commitment(self: &TestMoleAnchor) -> AnchorCommitment;
         /// The grant endpoint: consumes an
         /// `application/mole-endorsement-request` body.
         fn handle_endorse(self: &mut TestMoleAnchor, body: &[u8]) -> TestHttpResponse;
@@ -245,6 +288,8 @@ mod ffi {
             refund: u64,
         ) -> Box<TestMoleModerator>;
         fn moderator_directory_json(self: &TestMoleModerator) -> String;
+        /// The registry entry this Moderator would publish for its policy.
+        fn moderator_commitment(self: &TestMoleModerator) -> ModeratorCommitment;
         /// The protected resource: `authorization_header` is the raw
         /// `Authorization` value, or empty for an unauthenticated request.
         fn handle_resource(
@@ -257,8 +302,9 @@ mod ffi {
 }
 
 use ffi::{
-    Blob, ChallengeEval, GrantBegin, GrantStep, PresentBegin, RedeemBegin, RedeemFinish,
-    StatusResult, TestHttpResponse,
+    AnchorCommitment, Blob, ChallengeEval, CommittedPolicy, GrantBegin, GrantStep,
+    ModeratorCommitment, PresentBegin, RedeemBegin, RedeemFinish, StatusResult,
+    TestHttpResponse,
 };
 
 fn ok_status() -> StatusResult {
@@ -382,13 +428,24 @@ fn parse_moderator_challenges(
 }
 
 impl MoleBrowserClient {
-    fn grant_begin(&mut self, anchor_directory_json: &str) -> GrantBegin {
+    fn grant_begin(
+        &mut self,
+        anchor_directory_json: &str,
+        commitment: &AnchorCommitment,
+    ) -> GrantBegin {
         let fail = |error: String| GrantBegin {
             ok: false,
             error,
             endorse_path: String::new(),
             request_body: Vec::new(),
         };
+
+        // Fail-closed: an Anchor with no registry entry cannot be used. The
+        // key and epoch below are checked against the committed set, so a
+        // server cannot mint a per-user key or epoch to tag the endorsement.
+        if !commitment.found {
+            return fail("anchor is not enrolled in the key-commitment registry".into());
+        }
 
         let directory: AnchorDirectory = match serde_json::from_str(anchor_directory_json) {
             Ok(d) => d,
@@ -408,11 +465,21 @@ impl MoleBrowserClient {
         if decode_anchor_key(&anchor_key).is_err() {
             return fail("anchor key does not decode".into());
         }
+        if !commitment.keys.iter().any(|k| k.bytes[..] == anchor_key[..]) {
+            return fail("anchor key is not in the committed set".into());
+        }
         let endorsement_context =
             match mole_core::http::b64_decode(&config.endorsement_context) {
                 Ok(c) => c,
                 Err(e) => return fail(format!("endorsement context encoding: {e}")),
             };
+        if !commitment
+            .epochs
+            .iter()
+            .any(|e| e.bytes[..] == endorsement_context[..])
+        {
+            return fail("endorsement epoch is not committed".into());
+        }
 
         // The nullifier is Client-chosen and never seen by the Anchor.
         let mut nf = [0u8; 32];
@@ -580,12 +647,19 @@ impl MoleBrowserClient {
         &mut self,
         moderator_directory_json: &str,
         www_authenticate: &Vec<String>,
+        commitment: &ModeratorCommitment,
     ) -> RedeemBegin {
         let fail = |error: String| RedeemBegin {
             ok: false,
             error,
             authorization_header: String::new(),
         };
+
+        // Fail-closed: a Moderator with no registry entry cannot be redeemed
+        // against.
+        if !commitment.found {
+            return fail("moderator is not enrolled in the key-commitment registry".into());
+        }
 
         let (_credential_challenge, act_challenge, moderator_challenge) =
             match parse_moderator_challenges(www_authenticate) {
@@ -596,6 +670,29 @@ impl MoleBrowserClient {
             Ok(c) => c,
             Err(e) => return fail(format!("malformed IHAT challenge: {e}")),
         };
+
+        // The committed policy pins every partitionable parameter. Refuse if
+        // the challenged policy is not committed for this Moderator.
+        let Some(committed) = commitment
+            .policies
+            .iter()
+            .find(|p| p.policy_context[..] == act_challenge.policy_context[..])
+        else {
+            return fail("policy is not committed for this moderator".into());
+        };
+        // The accepted Anchor set is the OR-proof's anonymity set. It must be
+        // the whole committed set in the committed order — never a server-
+        // chosen subset or reordering — or a Moderator could shrink/craft it
+        // per user to deanonymize.
+        if ihat_challenge.keys.len() != committed.accepted_anchor_keys.len()
+            || ihat_challenge
+                .keys
+                .iter()
+                .zip(&committed.accepted_anchor_keys)
+                .any(|(k, c)| k[..] != c.bytes[..])
+        {
+            return fail("challenge accepted set does not match the committed set".into());
+        }
 
         let directory: ModeratorDirectory = match serde_json::from_str(moderator_directory_json)
         {
@@ -619,6 +716,12 @@ impl MoleBrowserClient {
             Ok(b) => b,
             Err(e) => return fail(format!("ACT key encoding: {e}")),
         };
+        // The directory-advertised ACT key and domain separator must be the
+        // committed ones: otherwise a per-user ACT key would deanonymize at
+        // spend.
+        if act_public_key_bytes[..] != committed.act_public_key[..] {
+            return fail("ACT public key is not committed".into());
+        }
         let act_public_key = match ActPublicKey::from_wire(&act_public_key_bytes) {
             Ok(k) => k,
             Err(e) => return fail(format!("ACT key: {e:?}")),
@@ -627,11 +730,21 @@ impl MoleBrowserClient {
             Ok(d) => d,
             Err(e) => return fail(format!("ACT domain separator encoding: {e}")),
         };
+        if domain_separator[..] != committed.act_domain_separator[..] {
+            return fail("ACT domain separator is not committed".into());
+        }
         let act_params = ActParams::from_domain_separator(&domain_separator);
         let expected_context = match mole_core::http::b64_decode(&policy.endorsement_context) {
             Ok(c) => c,
             Err(e) => return fail(format!("endorsement context encoding: {e}")),
         };
+        if !committed
+            .epochs
+            .iter()
+            .any(|e| e.bytes[..] == expected_context[..])
+        {
+            return fail("redemption epoch is not committed".into());
+        }
 
         // Find an Endorsement from an Anchor in the accepted set, granted in
         // the epoch the Moderator accepts.
@@ -1092,6 +1205,14 @@ impl TestMoleAnchor {
         self.key.public_key().to_bytes().to_vec()
     }
 
+    fn anchor_commitment(&self) -> AnchorCommitment {
+        AnchorCommitment {
+            found: true,
+            keys: vec![Blob { bytes: self.anchor_public_key() }],
+            epochs: vec![Blob { bytes: self.endorsement_context.clone() }],
+        }
+    }
+
     fn anchor_directory_json(&self) -> String {
         let directory = AnchorDirectory {
             endorsement_configs: vec![AnchorEndorsementConfig {
@@ -1237,6 +1358,23 @@ impl TestMoleModerator {
                 topup: 0,
             }
             .to_bytes(),
+        }
+    }
+
+    fn moderator_commitment(&self) -> ModeratorCommitment {
+        ModeratorCommitment {
+            found: true,
+            policies: vec![CommittedPolicy {
+                policy_context: self.policy_context.clone(),
+                act_public_key: self.act_key.public().to_wire(),
+                act_domain_separator: self.act_domain_separator.clone(),
+                accepted_anchor_keys: self
+                    .accepted_anchor_keys
+                    .iter()
+                    .map(|k| Blob { bytes: k.to_vec() })
+                    .collect(),
+                epochs: vec![Blob { bytes: self.endorsement_context.clone() }],
+            }],
         }
     }
 

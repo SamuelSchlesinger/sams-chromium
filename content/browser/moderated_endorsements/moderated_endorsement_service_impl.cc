@@ -12,6 +12,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "components/moderated_endorsements/mole_ffi.rs.h"
 #include "content/browser/moderated_endorsements/mole_client_holder.h"
+#include "content/browser/moderated_endorsements/mole_commitment_registry.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/storage_partition.h"
@@ -261,7 +262,11 @@ void ModeratedEndorsementServiceImpl::OnAnchorDirectory(
     return;
   }
 
-  auto begin = holder().client().grant_begin(rust::Str(*body));
+  // Enforce the key-commitment registry: the Anchor's advertised key and epoch
+  // must be committed for its origin, or the grant is refused (fail-closed).
+  auto commitment = MoleCommitmentRegistry::GetInstance().GetAnchorCommitment(
+      url::Origin::Create(endorse_url));
+  auto begin = holder().client().grant_begin(rust::Str(*body), commitment);
   if (!begin.ok) {
     std::move(callback).Run(EndorsementStatus::kRejected);
     return;
@@ -452,8 +457,13 @@ void ModeratedEndorsementServiceImpl::OnModeratorDirectory(
     std::move(callback).Run(EndorsementStatus::kRejected, std::string());
     return;
   }
+  // Enforce the key-commitment registry: the challenged policy, its ACT key,
+  // accepted set, and epoch must all be committed for the Moderator's origin.
+  auto commitment =
+      MoleCommitmentRegistry::GetInstance().GetModeratorCommitment(
+          url::Origin::Create(resource_url));
   auto redeem = holder().client().redeem_begin(
-      rust::Str(*body), ToRustStrings(www_authenticate));
+      rust::Str(*body), ToRustStrings(www_authenticate), commitment);
   if (!redeem.ok) {
     // No usable endorsement for this moderator's policy (or a malformed
     // directory). Opaque to the page for the same reason as the probe-time

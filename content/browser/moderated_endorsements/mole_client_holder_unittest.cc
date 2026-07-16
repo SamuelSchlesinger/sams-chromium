@@ -33,7 +33,7 @@ rust::Slice<const uint8_t> AsSlice(const rust::Vec<uint8_t>& v) {
 // Runs the two-round grant against `anchor`, storing an endorsement in `client`.
 bool CollectEndorsement(MoleBrowserClient& client, TestMoleAnchor& anchor) {
   std::string directory(anchor.anchor_directory_json());
-  auto begin = client.grant_begin(directory);
+  auto begin = client.grant_begin(directory, anchor.anchor_commitment());
   if (!begin.ok) {
     return false;
   }
@@ -57,7 +57,8 @@ bool CollectEndorsement(MoleBrowserClient& client, TestMoleAnchor& anchor) {
 size_t RedeemAndIssue(MoleBrowserClient& client, TestMoleModerator& mod) {
   auto challenge = mod.handle_resource("");
   auto redeem = client.redeem_begin(std::string(mod.moderator_directory_json()),
-                                    challenge.www_authenticate);
+                                    challenge.www_authenticate,
+                                    mod.moderator_commitment());
   if (!redeem.ok) {
     return 0;
   }

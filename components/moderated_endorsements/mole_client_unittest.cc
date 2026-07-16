@@ -65,7 +65,8 @@ Deployment Deploy(uint64_t initial_credits,
 // Runs the two-exchange grant flow; returns true on success.
 bool CollectEndorsement(Deployment& d) {
   std::string directory(d.anchor->anchor_directory_json());
-  GrantBegin begin = d.client->grant_begin(directory);
+  GrantBegin begin =
+      d.client->grant_begin(directory, d.anchor->anchor_commitment());
   if (!begin.ok) {
     ADD_FAILURE() << "grant_begin: " << std::string(begin.error);
     return false;
@@ -103,7 +104,7 @@ size_t RedeemAndIssue(Deployment& d) {
 
   RedeemBegin redeem = d.client->redeem_begin(
       std::string(d.moderator->moderator_directory_json()),
-      challenge.www_authenticate);
+      challenge.www_authenticate, d.moderator->moderator_commitment());
   if (!redeem.ok) {
     ADD_FAILURE() << "redeem_begin: " << std::string(redeem.error);
     return 0;
@@ -254,7 +255,7 @@ TEST(MoleClientTest, ReplayedRedemptionRejected) {
   TestHttpResponse challenge = d.moderator->handle_resource("");
   RedeemBegin redeem = d.client->redeem_begin(
       std::string(d.moderator->moderator_directory_json()),
-      challenge.www_authenticate);
+      challenge.www_authenticate, d.moderator->moderator_commitment());
   ASSERT_TRUE(redeem.ok);
 
   std::string header(redeem.authorization_header);
@@ -408,6 +409,81 @@ TEST(MoleClientTest, RestoreRejectsCorruptBlobAndLeavesStateIntact) {
   EXPECT_FALSE(d.client->restore_state(
       rust::Slice<const uint8_t>(garbage.data(), garbage.size())));
   EXPECT_EQ(d.client->endorsement_count(), 1u);
+}
+
+// --- Key-commitment enforcement (cross-site channel closure) --------------
+
+// An Anchor with no registry entry cannot mint an endorsement: the grant is
+// refused before any exchange.
+TEST(MoleClientCommitmentTest, GrantRefusedForUnenrolledAnchor) {
+  Deployment d = Deploy(2, 4, 1, 0, /*decoy_anchors=*/0);
+  std::string directory(d.anchor->anchor_directory_json());
+  AnchorCommitment absent;
+  absent.found = false;
+  GrantBegin begin = d.client->grant_begin(directory, absent);
+  EXPECT_FALSE(begin.ok);
+}
+
+// A per-user Anchor key (the singleton-key tagging channel) is refused: the
+// advertised key is not the committed one.
+TEST(MoleClientCommitmentTest, GrantRefusedForUncommittedKey) {
+  Deployment d = Deploy(2, 4, 1, 0, /*decoy_anchors=*/0);
+  std::string directory(d.anchor->anchor_directory_json());
+  // Commit a DIFFERENT anchor's key, so the served key is off-registry.
+  auto other = new_test_anchor(AsSlice(kEpoch));
+  GrantBegin begin = d.client->grant_begin(directory, other->anchor_commitment());
+  EXPECT_FALSE(begin.ok);
+}
+
+// A per-user epoch (the epoch-as-a-tag channel) is refused: the advertised
+// epoch is not committed.
+TEST(MoleClientCommitmentTest, GrantRefusedForUncommittedEpoch) {
+  Deployment d = Deploy(2, 4, 1, 0, /*decoy_anchors=*/0);
+  std::string directory(d.anchor->anchor_directory_json());
+  AnchorCommitment c = d.anchor->anchor_commitment();
+  // Same key, but the registry commits only a different epoch.
+  c.epochs.clear();
+  Blob other_epoch;
+  const std::string e = "some-other-epoch";
+  other_epoch.bytes = rust::Vec<uint8_t>();
+  for (char ch : e) {
+    other_epoch.bytes.push_back(static_cast<uint8_t>(ch));
+  }
+  c.epochs.push_back(std::move(other_epoch));
+  GrantBegin begin = d.client->grant_begin(directory, c);
+  EXPECT_FALSE(begin.ok);
+}
+
+// A Moderator with no registry entry cannot be redeemed against.
+TEST(MoleClientCommitmentTest, RedeemRefusedForUnenrolledModerator) {
+  Deployment d = Deploy(2, 4, 1, 0, /*decoy_anchors=*/0);
+  ASSERT_TRUE(CollectEndorsement(d));
+  TestHttpResponse challenge = d.moderator->handle_resource("");
+  ModeratorCommitment absent;
+  absent.found = false;
+  RedeemBegin redeem = d.client->redeem_begin(
+      std::string(d.moderator->moderator_directory_json()),
+      challenge.www_authenticate, absent);
+  EXPECT_FALSE(redeem.ok);
+}
+
+// A crafted accepted set (the set-partitioning channel) is refused: the
+// challenge names a set that differs from the committed canonical set.
+TEST(MoleClientCommitmentTest, RedeemRefusedForCraftedAcceptedSet) {
+  Deployment d = Deploy(2, 4, 1, 0, /*decoy_anchors=*/0);
+  ASSERT_TRUE(CollectEndorsement(d));
+  TestHttpResponse challenge = d.moderator->handle_resource("");
+  // Commit an accepted set with an extra decoy key the challenge does not
+  // carry, so the challenge's set no longer equals the committed one.
+  ModeratorCommitment c = d.moderator->moderator_commitment();
+  auto decoy = new_test_anchor(AsSlice(kEpoch));
+  Blob extra;
+  extra.bytes = decoy->anchor_public_key();
+  c.policies[0].accepted_anchor_keys.push_back(std::move(extra));
+  RedeemBegin redeem = d.client->redeem_begin(
+      std::string(d.moderator->moderator_directory_json()),
+      challenge.www_authenticate, c);
+  EXPECT_FALSE(redeem.ok);
 }
 
 }  // namespace
