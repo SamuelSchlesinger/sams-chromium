@@ -11,6 +11,7 @@
 #include "base/json/json_reader.h"
 #include "base/no_destructor.h"
 #include "base/values.h"
+#include "content/public/browser/mole_key_commitments.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -231,6 +232,10 @@ MoleCommitmentRegistry::GetModeratorCommitment(
 void MoleCommitmentRegistry::ClearForTesting() {
   anchors_.clear();
   moderators_.clear();
+}
+
+bool SetMoleKeyCommitments(std::string_view json) {
+  return MoleCommitmentRegistry::GetInstance().ParseAndSet(json);
 }
 
 }  // namespace content

@@ -20,6 +20,8 @@ static_library("installer_policies_no_content_deps") {
     "amount_extraction_heuristic_regexes_component_installer.h",
     "first_party_sets_component_installer_policy.cc",
     "first_party_sets_component_installer_policy.h",
+    "mole_key_commitments_component_installer_policy.cc",
+    "mole_key_commitments_component_installer_policy.h",
     "origin_trials_component_installer.cc",
     "origin_trials_component_installer.h",
     "private_verification_tokens_installer_policy.cc",
