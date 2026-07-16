@@ -10,7 +10,7 @@
 [
   Exposed=Window,
   SecureContext,
-  RuntimeEnabled=MoleEndorsements
+  RuntimeEnabled=ModeratedEndorsements
 ] interface ModeratedEndorsements {
   [CallWith=ScriptState, RaisesException] Promise<undefined> collect(
       USVString url);

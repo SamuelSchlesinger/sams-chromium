@@ -67,7 +67,7 @@ constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
     }
     policy {
       cookies_allowed: NO
-      setting: "Gated behind the experimental MoleEndorsements feature."
+      setting: "Gated behind the experimental ModeratedEndorsements feature."
       policy_exception_justification: "Experimental demonstration API."
     })");
 
