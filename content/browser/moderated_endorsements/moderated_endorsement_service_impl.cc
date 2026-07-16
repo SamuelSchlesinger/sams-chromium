@@ -9,9 +9,9 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/strings/string_util.h"
-#include "base/supports_user_data.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/moderated_endorsements/mole_ffi.rs.h"
+#include "content/browser/moderated_endorsements/mole_client_holder.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/storage_partition.h"
@@ -70,8 +70,6 @@ constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
       policy_exception_justification: "Experimental demonstration API."
     })");
 
-const char kMoleClientHolderKey[] = "moderated-endorsements-mole-client";
-
 std::string BytesToString(const rust::Vec<uint8_t>& bytes) {
   return std::string(bytes.begin(), bytes.end());
 }
@@ -117,34 +115,10 @@ rust::Vec<rust::String> ToRustStrings(const std::vector<std::string>& values) {
 
 }  // namespace
 
-// The MoLE client state (endorsement store, credential pools) and the
-// coordination for the one-at-a-time Redeem & Issue flow. Scoped to the
-// BrowserContext: endorsements collected on one site answer challenges on
-// another.
-class MoleClientHolder : public base::SupportsUserData::Data {
- public:
-  MoleClientHolder()
-      : client_(moderated_endorsements::new_mole_browser_client()) {}
-
-  static MoleClientHolder& GetOrCreate(BrowserContext* browser_context) {
-    auto* holder = static_cast<MoleClientHolder*>(
-        browser_context->GetUserData(kMoleClientHolderKey));
-    if (!holder) {
-      auto owned = std::make_unique<MoleClientHolder>();
-      holder = owned.get();
-      browser_context->SetUserData(kMoleClientHolderKey, std::move(owned));
-    }
-    return *holder;
-  }
-
-  moderated_endorsements::MoleBrowserClient& client() { return *client_; }
-
-  bool redeem_in_flight = false;
-  std::vector<base::OnceClosure> pool_waiters;
-
- private:
-  rust::Box<moderated_endorsements::MoleBrowserClient> client_;
-};
+// The MoLE client state (endorsement store, credential pools), its persistence,
+// and the one-at-a-time Redeem & Issue coordination live in MoleClientHolder
+// (mole_client_holder.h), a BrowserContext-scoped object: endorsements
+// collected on one site answer challenges on another.
 
 // static
 void ModeratedEndorsementServiceImpl::Create(
@@ -254,7 +228,16 @@ void ModeratedEndorsementServiceImpl::Collect(const GURL& endorse_url,
     std::move(callback).Run(EndorsementStatus::kRejected);
     return;
   }
+  // Defer until the persisted endorsement store has loaded, so a grant never
+  // races the async restore.
+  holder().PostWhenLoaded(
+      base::BindOnce(&ModeratedEndorsementServiceImpl::CollectImpl,
+                     weak_factory_.GetWeakPtr(), endorse_url,
+                     std::move(callback)));
+}
 
+void ModeratedEndorsementServiceImpl::CollectImpl(const GURL& endorse_url,
+                                                  CollectCallback callback) {
   GURL directory_url = endorse_url.GetWithEmptyPath().Resolve(
       kAnchorDirectoryPath);
   Fetch(directory_url, /*authorization=*/{}, /*post_body=*/nullptr,
@@ -310,6 +293,8 @@ void ModeratedEndorsementServiceImpl::OnGrantExchange(
     return;
   }
   if (step.done) {
+    // A new endorsement was stored; persist the durable state.
+    holder().SchedulePersist();
     std::move(callback).Run(EndorsementStatus::kSuccess);
     return;
   }
@@ -329,7 +314,11 @@ void ModeratedEndorsementServiceImpl::Challenge(const GURL& resource_url,
     std::move(callback).Run(EndorsementStatus::kRejected, std::string());
     return;
   }
-  StartChallenge(resource_url, std::move(callback), /*attempt=*/0);
+  // Defer until the persisted pool/endorsement state has loaded.
+  holder().PostWhenLoaded(
+      base::BindOnce(&ModeratedEndorsementServiceImpl::StartChallenge,
+                     weak_factory_.GetWeakPtr(), resource_url,
+                     std::move(callback), /*attempt=*/0));
 }
 
 void ModeratedEndorsementServiceImpl::StartChallenge(
@@ -509,6 +498,8 @@ void ModeratedEndorsementServiceImpl::OnRedeemExchange(
     std::move(callback).Run(EndorsementStatus::kRejected, std::string());
     return;
   }
+  // The endorsement was spent and the credential pool filled; persist.
+  holder().SchedulePersist();
   Present(resource_url, std::move(callback), attempt, www_authenticate);
 }
 
@@ -554,6 +545,7 @@ void ModeratedEndorsementServiceImpl::OnPresentExchange(
     // The credential was burned when drawn and stays burned — it may have
     // reached the moderator.
     holder().client().present_abort(presentation_id);
+    holder().SchedulePersist();
     std::move(callback).Run(headers ? EndorsementStatus::kRejected
                                     : EndorsementStatus::kNetworkError,
                             std::string());
@@ -574,6 +566,8 @@ void ModeratedEndorsementServiceImpl::OnPresentExchange(
   } else {
     holder().client().present_abort(presentation_id);
   }
+  // The drawn credential's successor (or its removal) changed the pool; persist.
+  holder().SchedulePersist();
   std::move(callback).Run(EndorsementStatus::kSuccess,
                           body ? *body : std::string());
 }

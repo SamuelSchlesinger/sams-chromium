@@ -82,7 +82,8 @@ class ModeratedEndorsementServiceImpl final
                        FetchCallback,
                        std::optional<std::string> body);
 
-  // collect() steps.
+  // collect() steps. CollectImpl runs once the persisted state has loaded.
+  void CollectImpl(const GURL& endorse_url, CollectCallback);
   void OnAnchorDirectory(const GURL& endorse_url,
                          CollectCallback,
                          std::optional<std::string> body,
