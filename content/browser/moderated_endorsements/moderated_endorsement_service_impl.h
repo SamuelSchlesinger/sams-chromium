@@ -39,6 +39,23 @@ class MoleClientHolder;
 // //components/moderated_endorsements and is shared per BrowserContext, so
 // an endorsement collected on one site can answer a moderator challenge on
 // another.
+//
+// Cross-site privacy model:
+//  - Credentials go to the Anchor (which authenticates the user) but never to
+//    the Moderator; challenge() presentations are cookieless and unlinkable.
+//  - challenge() never distinguishes "no endorsement" from any other failure
+//    (all collapse to an opaque rejection), and its no-endorsement path fetches
+//    the Moderator directory first, so possession is observable only to a
+//    caller that actually acts as a Moderator, not via a bare 401 probe.
+//  - Residual timing channel (documented, not closed here): a challenge that
+//    must Redeem & Issue makes more round-trips than one served from a warm
+//    pool, and the Moderator's Redeem & Issue is inherently heavier (more
+//    server time, a larger batched-credential response) than any
+//    client-forgeable decoy. Padding the client's round-trip COUNT would cost
+//    ~2x latency on the common warm-pool path and still not equalize the
+//    server-side work an end-to-end timer sees, so full uniformity requires a
+//    Moderator-side change (constant-time, fixed-size responses, or folding
+//    redeem+present into one exchange) rather than a client-only mitigation.
 class ModeratedEndorsementServiceImpl final
     : public DocumentService<blink::mojom::ModeratedEndorsementService> {
  public:
