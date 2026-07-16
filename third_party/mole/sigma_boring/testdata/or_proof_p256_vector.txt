@@ -1,0 +1,38 @@
+# P-256 OR-proof golden vector, emitted by sigma-rs
+# (examples/or_p256_vector.rs in the sigma-proofs repo, --features p256).
+# OR of two branches: [0] discrete_log P1=x1*G (simulated), [1] DLEQ
+# P2=x2*G ∧ Q=x2*H (real, witness x2). Session "or_proof_example".
+#
+# Batchable Nizk proof = serialize(ComposedCommitment) || serialize(ComposedResponse).
+# ComposedCommitment::Or = TAG_OR u8 || len u32-LE || per-branch (recursive;
+#   Simple = TAG_SIMPLE u8 || len u32-LE || group elements[33]).
+# ComposedResponse::Or  = TAG_OR u8 || len u32-LE || challenges[32]... ||
+#   len u32-LE || responses (recursive Simple).
+# CDS: the branches' challenges combine to the transcript challenge (sigma-rs
+# uses the Threshold/interpolation machinery; reproduce from composition.rs).
+#
+# COMPLETE OR-VERIFIER ALGORITHM (from composition.rs), ready to implement:
+#  - Composed instance (absorbed) = concat of each branch's LinearRelation
+#    label, in order (NO composition tag). Here: discrete_log_label(86B) ||
+#    dleq_label. See INSTANCE below.
+#  - init transcript(protocol_id="sigma-proofs_Shake128_P256", session, INSTANCE).
+#  - Deserialize proof = ComposedCommitment::Or || ComposedResponse::Or.
+#    ComposedCommitment absorbed via its FULL tagged .encode() (TAG_OR||len||
+#    per-branch TAG_SIMPLE||len||points) — not just raw points.
+#  - challenge c = squeeze 64B wide-reduce (as usual).
+#  - OR = Threshold(1, n): expand_threshold_challenges: degree=n-1 compressed
+#    challenges (the ComposedResponse::Or `challenges` list). Points =
+#    (x=0,y=c) + (x=i+1, y=compressed_i) for i in 0..n-1. Lagrange-interpolate
+#    a degree-(n-1) poly; branch_challenge[i] = poly(i+1) for i in 0..n.
+#    threshold_x(i) = Scalar::from(i+1).
+#  - Per branch i: linear-relation check with branch_challenge[i],
+#    branch_commitment[i], branch_response[i] (Σ resp·G_k == commit + ch·image).
+# NEEDS: Scalar::from_u64, recursive proof deserialization, Lagrange interp.
+INSTANCE 0100000001000000010000000000000000000000036b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296026780c5fc70275e2c7061a0e7877bb174deadeb9887027f3fa83654158ba7f50c020000000100000001000000000000000000000003000000010000000000000002000000036b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c29602fb50388f29498d0a93ad25ec4c34037b9d3cc3cca4787eb6fedabe2b3003eac8028e533b6fa0bf7b4625bb30667c01fb607ef9f8b8a80fef5b300628703187b2a3023f53a2e061a6f7306cf2ca298f96c9d7e2e162fee67d2d2228d83237856bcca4
+SESSION 6f725f70726f6f665f6578616d706c65
+P1 026780c5fc70275e2c7061a0e7877bb174deadeb9887027f3fa83654158ba7f50c
+P2 02fb50388f29498d0a93ad25ec4c34037b9d3cc3cca4787eb6fedabe2b3003eac8
+Q 023f53a2e061a6f7306cf2ca298f96c9d7e2e162fee67d2d2228d83237856bcca4
+H 028e533b6fa0bf7b4625bb30667c01fb607ef9f8b8a80fef5b300628703187b2a3
+PROOF 02020000000001000000026499c0a0a83ec41edbcdb79417e9549d8e06d2b346955a57670b55bdbb93124100020000000256ea6520e0de34d9b48fc0c927d6db8add4ad028d4c71ed9618ffba33a73ffdf027320be50c10bf48a08e1d0cc532825877fd99ce0021ce385e9d2da1858652a3f0201000000c4554d1ecdf6c9248385fb5ddc81441e2eeb45e3a79ae592b1643ad9061e477a02000000000100000033545092a14c770d9de8eaf4ffcf18731010edd1e5ceb3d375f9082ecab11d920001000000d42e51f7f2eae276c730c5cd22722ca7a7c525ef95e10d7141f67aedda7659b7
+# EXPECTED transcript challenge (composed protocol id = SHA3-256([2;32] || branch_id*2), branch_id=SHA3-256([0;32]||pad("sigma-proofs_Shake128_P256"))): 8328bb975a8b628a6be2c5c2570869c284b217e018ad8c9ace71763deeb1e89a

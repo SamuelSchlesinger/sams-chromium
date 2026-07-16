@@ -1,0 +1,43 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# sigma_boring: the MoLE sigma-protocol primitives over Chromium's in-tree
+# BoringSSL, reached through raw bssl_sys FFI (reviewed per-call SAFETY
+# blocks). This is the first-party replacement for the vendored
+# sigma-proofs / curve25519-dalek / p256 crypto stack — see
+# //third_party/internet/mole/web-draft/BORINGSSL-PRUNE-PLAN.md (author's tree).
+
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("sigma_boring") {
+  crate_name = "sigma_boring"
+  crate_root = "src/lib.rs"
+  sources = [
+    "src/bssl.rs",
+    "src/codec.rs",
+    "src/composition.rs",
+    "src/keccak.rs",
+    "src/lib.rs",
+    "src/linear_relation.rs",
+    "src/shake.rs",
+  ]
+  edition = "2021"
+  allow_unsafe = true  # Raw bssl_sys FFI; every call has a SAFETY comment.
+  deps = [
+    "//third_party/boringssl:bssl_sys",
+    "//third_party/boringssl:mole_crypto_shim",
+    "//third_party/rust/subtle/v2:lib",
+  ]
+
+  # Differential tests pin the BoringSSL layer against the crates this port
+  # replaces (`p256` for the curve, `keccak` for the permutation); those deps
+  # are test-only and disappear when the vendored stack is removed.
+  build_native_rust_unit_tests = true
+  test_deps = [
+    "//third_party/rust/keccak/v0_2:lib",
+    "//third_party/rust/p256/v0_13:lib",
+    "//third_party/rust/sha2/v0_10:lib",
+    "//third_party/rust/spongefish/v0_7:lib",
+  ]
+}
