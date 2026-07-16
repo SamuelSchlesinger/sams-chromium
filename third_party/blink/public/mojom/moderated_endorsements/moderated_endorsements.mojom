@@ -1,0 +1,54 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+module blink.mojom;
+
+import "url/mojom/url.mojom";
+
+// Why a navigator.endorsement operation could not complete. Deliberately
+// coarse: the renderer (and the page) must not learn which cryptographic
+// check failed, nor anything about the user's cross-site endorsement state.
+//
+// In particular there is NO distinct "you hold no endorsement" outcome for
+// challenge(). Surfacing that would be a cross-site possession oracle: a page
+// can point challenge() at any origin and craft the 401 `WWW-Authenticate`
+// challenge to name arbitrary anchor keys, so a distinguishable "no
+// endorsement" answer — decided from local, cross-site endorsement state
+// without any genuine redemption — would let it probe whether the user was
+// endorsed by an anchor of the caller's choosing. Possession is therefore only
+// ever observable through an actual redemption exchange the moderator itself
+// processes; every other failure collapses to the opaque `kRejected`. (A
+// production UA that wants to prompt "get endorsed first" must surface that
+// through a separate, permission-gated, moderator-committed affordance, not a
+// free probe.)
+enum EndorsementStatus {
+  kSuccess,
+
+  // The anchor or moderator rejected the exchange, answered outside the
+  // protocol, or — for challenge() — no usable endorsement/credential was
+  // available. Intentionally indistinguishable (see above).
+  kRejected,
+
+  // A request could not be sent or answered.
+  kNetworkError,
+};
+
+// The MoLE (Moderation of unLinkable Endorsements) user-agent client,
+// backing navigator.endorsement. Document-scoped; implemented in the
+// browser process, where the endorsement store and the per-policy ACT
+// credential pools live (scoped to the BrowserContext). The renderer never
+// sees key material, endorsements, or credentials.
+interface ModeratedEndorsementService {
+  // navigator.endorsement.collect(url): run the endorsement grant against
+  // the document's site (the Anchor). `endorse_url` must be same-origin
+  // with the document.
+  Collect(url.mojom.Url endorse_url) => (EndorsementStatus status);
+
+  // navigator.endorsement.challenge(url): fetch the Moderator-protected
+  // resource, answering its Mole challenges — redeeming an endorsement for
+  // a pool of credentials when needed, then presenting one. On success,
+  // `body` is the resource body (demonstration surface).
+  Challenge(url.mojom.Url resource_url)
+      => (EndorsementStatus status, string body);
+};

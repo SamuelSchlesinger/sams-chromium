@@ -4185,6 +4185,10 @@
       base_feature: "none",
       is_protected_feature: true,
     },
+    {
+      name: "MoleEndorsements",
+      status: "experimental",
+    },
     // Move the selection to the last position in the list item. See
     // https://crbug.com/331841851
     {

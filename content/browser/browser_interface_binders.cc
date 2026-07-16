@@ -44,6 +44,7 @@
 #include "content/browser/media/media_web_contents_observer.h"
 #include "content/browser/media/midi_host.h"
 #include "content/browser/media/session/media_session_service_impl.h"
+#include "content/browser/moderated_endorsements/moderated_endorsement_service_impl.h"
 #include "content/browser/network/reporting_service_proxy.h"
 #include "content/browser/picture_in_picture/picture_in_picture_service_impl.h"
 #include "content/browser/preloading/anchor_element_interaction_host_impl.h"
@@ -1394,6 +1395,8 @@ void PopulateBinderMapWithContext(
   map->Add<blink::mojom::MediaSessionService>(&MediaSessionServiceImpl::Create);
   map->Add<blink::mojom::PictureInPictureService>(
       &PictureInPictureServiceImpl::Create);
+  map->Add<blink::mojom::ModeratedEndorsementService>(
+      &ModeratedEndorsementServiceImpl::Create);
   map->Add<blink::mojom::WakeLockService>(&WakeLockServiceImpl::Create);
 #if BUILDFLAG(ENABLE_VR)
   map->Add<device::mojom::VRService>(&VRServiceImpl::Create);
