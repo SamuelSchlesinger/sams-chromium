@@ -1,0 +1,40 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# ihat_boring: the IHAT issuer-hiding protocol over BoringSSL (via
+# //third_party/mole/sigma_boring), the first-party port of ihat-rs off the
+# p256/elliptic-curve crate stack.
+
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("ihat_boring") {
+  crate_name = "ihat_boring"
+  crate_root = "src/lib.rs"
+  sources = [
+    "src/anchor.rs",
+    "src/client.rs",
+    "src/hash.rs",
+    "src/interop_tests.rs",
+    "src/lib.rs",
+    "src/messages.rs",
+    "src/orproof.rs",
+    "src/wire.rs",
+  ]
+  edition = "2021"
+  deps = [
+    "//third_party/mole/sigma_boring",
+    "//third_party/rust/subtle/v2:lib",
+  ]
+
+  # Test-only: the reference `ihat` crate (on the p256 stack) is the prover in
+  # the differential interop tests; `ihat_boring` itself never depends on it, so
+  # the production verifier stays on BoringSSL alone. `rand_core` supplies the
+  # RngCore/CryptoRng traits the reference prover API requires.
+  test_deps = [
+    "//third_party/mole:ihat",
+    "//third_party/rust/rand_core/v0_6:lib",
+  ]
+
+  build_native_rust_unit_tests = true
+}
