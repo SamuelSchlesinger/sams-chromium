@@ -85,7 +85,6 @@
 #include "services/device/public/cpp/geolocation/location_system_permission_status.h"
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/network_service_buildflags.h"
-#include "services/network/public/cpp/network_switches.h"
 #include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/network_service.mojom.h"
@@ -459,11 +458,6 @@ void ShellContentBrowserClient::AppendExtraCommandLineSwitches(
       switches::kExposeInternalsForTesting,
       switches::kRunWebTests,
       switches::kTestRegisterStandardScheme,
-      // So the renderer treats --unsafely-treat-insecure-origin-as-secure
-      // origins as secure contexts (chrome forwards this in
-      // ChromeContentBrowserClient; content_shell needs it too for
-      // SecureContext-gated features over plain HTTP, e.g. local demos).
-      network::switches::kUnsafelyTreatInsecureOriginAsSecure,
   };
 
   command_line->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(),
