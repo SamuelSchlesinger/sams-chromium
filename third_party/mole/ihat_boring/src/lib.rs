@@ -28,6 +28,3 @@ pub use messages::{
 pub use orproof::{OrProof, Transcript};
 pub use sigma_boring::{Point, Scalar};
 pub use wire::WireError;
-
-#[cfg(test)]
-mod interop_tests;

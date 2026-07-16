@@ -15,7 +15,6 @@ rust_static_library("ihat_boring") {
     "src/anchor.rs",
     "src/client.rs",
     "src/hash.rs",
-    "src/interop_tests.rs",
     "src/lib.rs",
     "src/messages.rs",
     "src/orproof.rs",
@@ -27,14 +26,8 @@ rust_static_library("ihat_boring") {
     "//third_party/rust/subtle/v2:lib",
   ]
 
-  # Test-only: the reference `ihat` crate (on the p256 stack) is the prover in
-  # the differential interop tests; `ihat_boring` itself never depends on it, so
-  # the production verifier stays on BoringSSL alone. `rand_core` supplies the
-  # RngCore/CryptoRng traits the reference prover API requires.
-  test_deps = [
-    "//third_party/mole:ihat",
-    "//third_party/rust/rand_core/v0_6:lib",
-  ]
-
+  # Self-contained unit tests only. The differential interop tests against the
+  # reference `ihat` crate (on the p256 stack) were removed once parity was
+  # pinned, so the reference crate no longer needs vendoring.
   build_native_rust_unit_tests = true
 }

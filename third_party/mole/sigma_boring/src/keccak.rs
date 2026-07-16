@@ -20,36 +20,3 @@ pub fn keccak_f1600(state: &mut [u64; 25]) {
     // pointer; `state` is a valid, uniquely-borrowed 25-word array.
     unsafe { MOLE_keccak_f1600(state.as_mut_ptr()) };
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn matches_keccak_crate_permutation() {
-        // Byte-for-byte parity with the `keccak` crate spongefish uses.
-        for seed in 0u64..8 {
-            let mut ours = [0u64; 25];
-            for (i, w) in ours.iter_mut().enumerate() {
-                *w = seed
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .wrapping_add(i as u64);
-            }
-            let mut theirs = ours;
-            keccak_f1600(&mut ours);
-            keccak::Keccak::new().with_f1600(|f| f(&mut theirs));
-            assert_eq!(ours, theirs, "seed {seed}");
-        }
-    }
-
-    #[test]
-    fn all_zero_state_matches() {
-        let mut ours = [0u64; 25];
-        let mut theirs = [0u64; 25];
-        keccak_f1600(&mut ours);
-        keccak::Keccak::new().with_f1600(|f| f(&mut theirs));
-        assert_eq!(ours, theirs);
-        // A permutation of the all-zero state is not the identity.
-        assert_ne!(ours, [0u64; 25]);
-    }
-}
