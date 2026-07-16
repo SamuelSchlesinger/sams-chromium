@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset=utf-8><title>socks.com</title>
+<style>body{font:16px system-ui;max-width:40em;margin:3em auto;padding:0 1em}
+button{font:inherit;padding:.5em 1em}pre{background:#f4f4f4;padding:1em;white-space:pre-wrap}
+a{color:#06c}</style>
+<h1>🧦 socks.com</h1>
+<p>Different store, <b>same anti-fraud provider</b> — antifraud.com. If you
+already got verified at shoes.com, your browser presents another anonymous
+credential from the <b>same pool</b>: no second round-trip to redeem, and
+nothing links this visit to your shoes.com visit.</p>
+<button id=go>Verify me</button>
+<pre id=out>(not verified yet)</pre>
+<p><a href="http://anchor.com">🔒 anchor.com</a> ·
+<a href="http://shoes.com">👟 shoes.com</a> ·
+<a href="http://antifraud.com">🛡️ antifraud.com</a> (watch the counters)</p>
+<script>
+go.onclick = async () => {
+  out.textContent = "verifying via antifraud.com…";
+  try {
+    const body = await navigator.endorsement.challenge("http://antifraud.com/gate");
+    out.textContent = "✓ verified — welcome to socks.com!\n\nantifraud.com said:\n" + body;
+  } catch (e) {
+    out.textContent = "✗ not verified: " + e +
+      "\n\nVisit anchor.com first to collect an endorsement.";
+  }
+};
+</script>

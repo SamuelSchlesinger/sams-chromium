@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset=utf-8><title>shoes.com</title>
+<style>body{font:16px system-ui;max-width:40em;margin:3em auto;padding:0 1em}
+button{font:inherit;padding:.5em 1em}pre{background:#f4f4f4;padding:1em;white-space:pre-wrap}
+a{color:#06c}</style>
+<h1>👟 shoes.com</h1>
+<p>Welcome! Before checkout we confirm you're a real person and not a bot — via
+our anti-fraud provider <b>antifraud.com</b>. <b>No login, no cookies, no
+tracking</b>: your browser proves you're vouched-for without revealing who you
+are, and antifraud.com can't tell this is the same you who shops at socks.com.</p>
+<button id=go>Verify me</button>
+<pre id=out>(not verified yet)</pre>
+<p>First get an endorsement at <a href="http://anchor.com">🔒 anchor.com</a>.
+Then compare with <a href="http://socks.com">🧦 socks.com</a> and watch
+<a href="http://antifraud.com">🛡️ antifraud.com</a>'s counters.</p>
+<script>
+go.onclick = async () => {
+  out.textContent = "verifying via antifraud.com…";
+  try {
+    const body = await navigator.endorsement.challenge("http://antifraud.com/gate");
+    out.textContent = "✓ verified — welcome to shoes.com!\n\nantifraud.com said:\n" + body;
+  } catch (e) {
+    out.textContent = "✗ not verified: " + e +
+      "\n\nVisit anchor.com first to collect an endorsement.";
+  }
+};
+</script>

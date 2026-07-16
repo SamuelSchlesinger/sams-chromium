@@ -50,4 +50,11 @@ test("mole_unittests") {
     "//third_party/mole/ihat_boring:ihat_boring_unittests",
     "//third_party/mole/sigma_boring:sigma_boring_unittests",
   ]
+
+  # Keeps the standalone demo servers in the build graph so they are reachable
+  # (they run alongside content_shell; see //third_party/mole/mole_demo).
+  data_deps = [
+    "//third_party/mole/mole_demo:mole_demo_anchor",
+    "//third_party/mole/mole_demo:mole_demo_moderator",
+  ]
 }
