@@ -23,14 +23,15 @@ constexpr char kEpoch[] = "epoch-holder-test";
 constexpr char kPolicy[] = "policy-holder-test";
 
 rust::Slice<const uint8_t> AsSlice(const std::string& s) {
-  return rust::Slice<const uint8_t>(
-      reinterpret_cast<const uint8_t*>(s.data()), s.size());
+  return rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()),
+                                    s.size());
 }
 rust::Slice<const uint8_t> AsSlice(const rust::Vec<uint8_t>& v) {
   return rust::Slice<const uint8_t>(v.data(), v.size());
 }
 
-// Runs the two-round grant against `anchor`, storing an endorsement in `client`.
+// Runs the two-round grant against `anchor`, storing an endorsement in
+// `client`.
 bool CollectEndorsement(MoleBrowserClient& client, TestMoleAnchor& anchor) {
   std::string directory(anchor.anchor_directory_json());
   auto begin = client.grant_begin(directory, anchor.anchor_commitment());
@@ -77,7 +78,8 @@ struct TestDeployment {
 };
 
 TestDeployment Deploy() {
-  auto anchor = moderated_endorsements::new_test_anchor(AsSlice(std::string(kEpoch)));
+  auto anchor =
+      moderated_endorsements::new_test_anchor(AsSlice(std::string(kEpoch)));
   rust::Vec<moderated_endorsements::Blob> accepted;
   moderated_endorsements::Blob real;
   real.bytes = anchor->anchor_public_key();
@@ -109,7 +111,7 @@ TEST(MoleClientHolderPersistenceTest, PoolSurvivesReloadFromDisk) {
     EXPECT_EQ(holder->client().pool_size(AsSlice(policy)), 4u);
 
     holder->SchedulePersist();
-    holder.reset();  // destructor flushes the debounced write
+    holder.reset();                   // destructor flushes the debounced write
     task_environment.RunUntilIdle();  // background atomic write completes
   }
 

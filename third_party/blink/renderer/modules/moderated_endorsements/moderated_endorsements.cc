@@ -43,7 +43,7 @@ mojom::blink::ModeratedEndorsementService* ModeratedEndorsements::GetService() {
             context->GetTaskRunner(TaskType::kMiscPlatformAPI)));
     service_.set_disconnect_handler(
         BindOnce(&ModeratedEndorsements::OnServiceDisconnected,
-                      WrapWeakPersistent(this)));
+                 WrapWeakPersistent(this)));
   }
   return service_.get();
 }
@@ -79,9 +79,8 @@ ScriptPromise<IDLUndefined> ModeratedEndorsements::collect(
   auto promise = resolver->Promise();
   pending_resolvers_.insert(resolver);
   GetService()->Collect(
-      endorse_url,
-      BindOnce(&ModeratedEndorsements::OnCollect, WrapPersistent(this),
-                    WrapPersistent(resolver)));
+      endorse_url, BindOnce(&ModeratedEndorsements::OnCollect,
+                            WrapPersistent(this), WrapPersistent(resolver)));
   return promise;
 }
 
@@ -107,9 +106,8 @@ ScriptPromise<IDLString> ModeratedEndorsements::challenge(
   auto promise = resolver->Promise();
   pending_resolvers_.insert(resolver);
   GetService()->Challenge(
-      resource_url,
-      BindOnce(&ModeratedEndorsements::OnChallenge, WrapPersistent(this),
-                    WrapPersistent(resolver)));
+      resource_url, BindOnce(&ModeratedEndorsements::OnChallenge,
+                             WrapPersistent(this), WrapPersistent(resolver)));
   return promise;
 }
 

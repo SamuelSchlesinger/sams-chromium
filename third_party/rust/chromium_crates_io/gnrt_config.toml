@@ -165,9 +165,6 @@ group = 'test'
 allow_first_party_usage = false
 extra_kv = { allow_unsafe = true }
 
-[crate.base16ct.extra_kv]
-allow_unsafe = true
-
 [crate.base64.extra_kv]
 allow_unsafe = false
 
@@ -194,15 +191,6 @@ extra_kv = { allow_unsafe = false }
 
 [crate.bitflags.extra_kv]
 allow_unsafe = false
-
-[crate.bitvec]
-extra_input_roots = ['../README.md', '../doc']
-
-[crate.bitvec.extra_kv]
-allow_unsafe = true
-
-[crate.block-buffer.extra_kv]
-allow_unsafe = true
 
 [crate.bytemuck.extra_kv]
 allow_unsafe = true
@@ -254,12 +242,6 @@ extra_kv = { allow_unsafe = false }
 [crate.codespan-reporting.extra_kv]
 allow_unsafe = false
 
-[crate.const-oid]
-extra_input_roots = ['../README.md']
-
-[crate.const-oid.extra_kv]
-allow_unsafe = true
-
 [crate.const_format]
 group = 'test'
 allow_first_party_usage = false
@@ -280,26 +262,8 @@ extra_kv = { allow_unsafe = true }
 [crate.core_maths.extra_kv]
 allow_unsafe = false
 
-[crate.cpufeatures]
-extra_input_roots = ['../README.md']
-
-[crate.cpufeatures.extra_kv]
-allow_unsafe = true
-
 [crate.crc32fast.extra_kv]
 allow_unsafe = true
-
-[crate.crypto-bigint]
-extra_input_roots = ['../README.md']
-
-[crate.crypto-bigint.extra_kv]
-allow_unsafe = true
-
-[crate.crypto-common]
-extra_input_roots = ['../README.md']
-
-[crate.crypto-common.extra_kv]
-allow_unsafe = false
 
 [crate.ctor]
 extra_kv = { allow_unsafe = false }
@@ -307,18 +271,6 @@ extra_kv = { allow_unsafe = false }
 [crate.ctor-proc-macro]
 extra_input_roots = ["../README.md"]
 extra_kv = { allow_unsafe = false }
-
-[crate.curve25519-dalek]
-extra_input_roots = ['../README.md', '../docs']
-
-[crate.curve25519-dalek.extra_kv]
-allow_unsafe = true
-
-[crate.curve25519-dalek-derive]
-extra_input_roots = ['../README.md']
-
-[crate.curve25519-dalek-derive.extra_kv]
-allow_unsafe = true
 
 [crate.cxx]
 extra_kv = { allow_unsafe = true }
@@ -339,19 +291,7 @@ allow_unsafe = false
 [crate.cxxbridge-macro.extra_kv]
 allow_unsafe = false
 
-[crate.der]
-extra_input_roots = ['../README.md']
-
-[crate.der.extra_kv]
-allow_unsafe = false
-
 [crate.derivre.extra_kv]
-allow_unsafe = false
-
-[crate.digest]
-extra_input_roots = ['../README.md']
-
-[crate.digest.extra_kv]
 allow_unsafe = false
 
 [crate.diplomat.extra_kv]
@@ -377,12 +317,6 @@ extra_kv = { allow_unsafe = false }
 [crate.either.extra_kv]
 allow_unsafe = true
 
-[crate.elliptic-curve]
-extra_input_roots = ['../README.md']
-
-[crate.elliptic-curve.extra_kv]
-allow_unsafe = false
-
 [crate.equivalent.extra_kv]
 allow_unsafe = false
 
@@ -404,9 +338,6 @@ configs_to_remove = ['//build/config/compiler:default_optimization']
 configs_to_add = ['//build/config/compiler:optimize']
 
 [crate.fend-core.extra_kv]
-allow_unsafe = false
-
-[crate.ff.extra_kv]
 allow_unsafe = false
 
 [crate.fixed_decimal.extra_kv]
@@ -439,12 +370,6 @@ allow_first_party_usage = false
 remove_deps = ['winapi']
 extra_kv = { allow_unsafe = true }
 
-[crate.funty]
-extra_kv = { allow_unsafe = false }
-
-[crate.generic-array.extra_kv]
-allow_unsafe = true
-
 [crate.getrandom]
 group = 'safe'
 allow_first_party_usage = false
@@ -459,9 +384,6 @@ multiversion_cleanup_bug = "https://crbug.com/493648964"
 [crate.gimli]
 allow_first_party_usage = false
 extra_kv = { allow_unsafe = true }
-
-[crate.group.extra_kv]
-allow_unsafe = false
 
 [crate.harfrust]
 extra_kv = { allow_unsafe = false }
@@ -498,12 +420,6 @@ visibility = [
 group = 'test'
 allow_first_party_usage = false
 extra_kv = { allow_unsafe = true }
-
-[crate.hybrid-array]
-extra_input_roots = ['../README.md']
-
-[crate.hybrid-array.extra_kv]
-allow_unsafe = true
 
 [crate.iana-time-zone]
 extra_kv = { allow_unsafe = true }
@@ -630,15 +546,6 @@ allow_unsafe = true
 # JXL decoding requires optimizations even in Debug builds for reasonable performance.
 configs_to_remove = ['//build/config/compiler:default_optimization']
 configs_to_add = ['//build/config/compiler:optimize']
-
-[crate.keccak]
-extra_input_roots = ['../README.md']
-
-[crate.keccak.extra_kv]
-# Used test-only by //third_party/mole/sigma_boring as the Keccak-f1600
-# differential oracle against the BoringSSL permutation shim.
-allow_unsafe = true
-visibility = ["//third_party/mole/*"]
 
 [crate.konst]
 extra_kv = { allow_unsafe = true }
@@ -772,12 +679,6 @@ extra_kv = { allow_unsafe = true }
 [crate.ordered-float]
 extra_kv = { allow_unsafe = true }
 
-[crate.p256]
-extra_input_roots = ['../README.md']
-
-[crate.p256.extra_kv]
-allow_unsafe = false
-
 [crate.parking_lot]
 extra_kv = { allow_unsafe = true }
 
@@ -801,17 +702,8 @@ extra_kv = { allow_unsafe = true }
 [crate.potential_utf.extra_kv]
 allow_unsafe = true
 
-[crate.ppv-lite86.extra_kv]
-allow_unsafe = true
-
 [crate.primal-check]
 extra_kv = { allow_unsafe = false }
-
-[crate.primeorder]
-extra_input_roots = ['../README.md']
-
-[crate.primeorder.extra_kv]
-allow_unsafe = false
 
 [crate.proc-macro-error-attr2]
 extra_kv = { allow_unsafe = false }
@@ -841,17 +733,8 @@ cpp_api_from_rust = true
 [crate.quote.extra_kv]
 allow_unsafe = false
 
-[crate.radium]
+[crate.rand_core]
 extra_kv = { allow_unsafe = false }
-
-[crate.rand.extra_kv]
-allow_unsafe = true
-
-[crate.rand_chacha.extra_kv]
-allow_unsafe = true
-
-[crate.rand_core.extra_kv]
-allow_unsafe = true
 
 [crate.read-fonts]
 extra_input_roots = ['../generated', '../data/generated']
@@ -888,9 +771,6 @@ allow_unsafe = false
 extra_kv = { allow_unsafe = true }
 shipped = false
 
-[crate.rustc_version]
-extra_kv = { allow_unsafe = false }
-
 [crate.rustfft]
 extra_kv = { allow_unsafe = true }
 
@@ -908,15 +788,6 @@ allow_first_party_usage = false
 extra_kv = { allow_unsafe = true }
 
 [crate.scopeguard]
-extra_kv = { allow_unsafe = true }
-
-[crate.sec1]
-extra_input_roots = ['../README.md']
-
-[crate.sec1.extra_kv]
-allow_unsafe = false
-
-[crate.semver]
 extra_kv = { allow_unsafe = true }
 
 [crate.serde]
@@ -944,15 +815,6 @@ extra_kv = { allow_unsafe = false }
 
 [crate.sfv]
 extra_kv = { allow_unsafe = false }
-
-[crate.sha2.extra_kv]
-allow_unsafe = true
-
-[crate.sha3]
-extra_input_roots = ['../README.md']
-
-[crate.sha3.extra_kv]
-allow_unsafe = false
 
 [crate.shared-brotli-patch-decoder]
 extra_kv = { allow_unsafe = true, extra_deps = ["//third_party/brotli:dec"] }
@@ -984,12 +846,6 @@ extra_kv = { allow_unsafe = false }
 ban_features = ['malloc_size_of']
 extra_kv = { allow_unsafe = true }
 
-[crate.spongefish]
-group = 'safe'
-
-[crate.spongefish.extra_kv]
-allow_unsafe = true
-
 [crate.stable_deref_trait.extra_kv]
 allow_unsafe = true
 
@@ -1012,10 +868,7 @@ allow_unsafe = false
 allow_unsafe = false
 
 [crate.subtle.extra_kv]
-# subtle contains a reviewed unconditional `unsafe` (repr(i8) Ordering cast in
-# `ConditionallySelectable for cmp::Ordering`). Required by the MoLE stack
-# (//third_party/mole) the same way the athm-pvt spike required it.
-allow_unsafe = true
+allow_unsafe = false
 
 [crate.symphonia.extra_kv]
 allow_unsafe = false
@@ -1047,9 +900,6 @@ allow_unsafe = true
 [crate.synstructure.extra_kv]
 allow_unsafe = false
 
-[crate.tap]
-extra_kv = { allow_unsafe = false }
-
 [crate.temporal_capi.extra_kv]
 allow_unsafe = false
 
@@ -1061,9 +911,7 @@ allow_unsafe = false
 
 [crate.thiserror]
 build_script_outputs = [ "private.rs" ]
-# //third_party/mole vendors the MoLE crypto crates outside chromium_crates_io;
-# they consume thiserror the way any vendored crate does.
-extra_kv = { allow_unsafe = false, visibility = ["//third_party/mole/*"] }
+extra_kv = { allow_unsafe = false }
 
 [crate.thiserror-impl]
 extra_kv = { allow_unsafe = false }
@@ -1100,9 +948,6 @@ extra_kv = { allow_unsafe = true }
 [crate.typeid]
 allow_first_party_usage = false
 extra_kv = { allow_unsafe = true }
-
-[crate.typenum.extra_kv]
-allow_unsafe = true
 
 [crate.typewit]
 allow_first_party_usage = false
@@ -1188,9 +1033,6 @@ extra_kv = { allow_unsafe = false }
 [crate.writeable.extra_kv]
 allow_unsafe = true
 
-[crate.wyz]
-extra_kv = { allow_unsafe = true }
-
 [crate.xml]
 license_files = [ "LICENSE" ]
 
@@ -1217,15 +1059,6 @@ extra_kv = { allow_unsafe = true }
 allow_unsafe = false
 
 [crate.zerofrom-derive.extra_kv]
-allow_unsafe = false
-
-[crate.zeroize]
-extra_input_roots = ['../README.md']
-
-[crate.zeroize.extra_kv]
-allow_unsafe = true
-
-[crate.zeroize_derive.extra_kv]
 allow_unsafe = false
 
 [crate.zerotrie.extra_kv]

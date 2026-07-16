@@ -164,7 +164,8 @@ component("boringssl") {
   # component so it can call the internal (unexported) bssl::ec_scalar_*
   # directly, re-exporting MOLE_p256_scalar_* under a stable default-visibility
   # ABI for //third_party/mole/sigma_boring. `include_dirs` reaches the internal
-  # headers (openssl/* already come via :external_config). NEEDS OWNERS SIGN-OFF.
+  # headers (openssl/* already come via :external_config). NEEDS OWNERS
+  # SIGN-OFF.
   sources += [ "mole_p256_scalar_shim.cc" ]
   include_dirs = [ "src" ]
 

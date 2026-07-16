@@ -54,43 +54,6 @@ static_assertions = "1"
 xml = "1.3.0"
 zune-jpeg = "0.5.15"
 
-[dependencies.curve25519-dalek]
-version = "4.1.3"
-features = ["digest", "ff", "group", "precomputed-tables", "zeroize"]
-
-[dependencies.elliptic-curve]
-version = "0.13.8"
-features = ["arithmetic", "hash2curve"]
-
-[dependencies.ff]
-version = "0.13"
-
-[dependencies.group]
-version = "0.13"
-
-[dependencies.p256]
-version = "0.13.2"
-default-features = false
-features = ["arithmetic", "hash2curve"]
-
-[dependencies.rand_core]
-version = "0.6"
-features = ["getrandom"]
-
-[dependencies.sha2]
-version = "0.10"
-
-[dependencies.sha3]
-version = "=0.11.0-rc.9"
-
-[dependencies.spongefish]
-version = "0.7"
-features = ["curve25519-dalek", "std"]
-
-[dependencies.zeroize]
-version = "1.8"
-features = ["zeroize_derive"]
-
 [dependencies.bytemuck]
 version = "1"
 features = ["nightly_portable_simd"]  # For std::simd coverage.
