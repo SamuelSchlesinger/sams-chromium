@@ -32,7 +32,7 @@ anchor.com.
 ## The walk-through
 
 1. **anchor.com** → "Get my endorsement" (`collect()` — same-origin).
-2. **shoes.com** → "Verify me" (`challenge("http://antifraud.com/gate")`): the
+2. **shoes.com** → "Verify me" (`challenge("https://antifraud.com/gate")`): the
    browser redeems the endorsement (once) and presents a credential.
 3. **socks.com** → "Verify me": presents from the *same pool*, no re-redeem.
 4. **antifraud.com** → watch the counters: **one redemption, two+ unlinkable

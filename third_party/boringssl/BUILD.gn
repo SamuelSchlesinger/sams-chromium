@@ -101,6 +101,10 @@ if (enable_rust) {
       # expose. Reviewed unsafe FFI, scoped to the one sigma target. NEEDS
       # BORINGSSL OWNERS SIGN-OFF (precedent: the athm-pvt grant).
       "//third_party/mole/sigma_boring:*",
+
+      # The MoLE demo servers (dev-only, not shipped) run a BoringSSL TLS
+      # listener so the demo speaks real HTTPS. Also OWNERS-gated.
+      "//third_party/mole/mole_demo:*",
     ]
 
     bindgen_deps = [ ":raw_bssl_sys_bindings" ]

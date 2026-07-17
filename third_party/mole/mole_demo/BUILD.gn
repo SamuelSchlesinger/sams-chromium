@@ -15,8 +15,9 @@ rust_static_library("mole_demo") {
   crate_root = "src/lib.rs"
   sources = [ "src/lib.rs" ]
   edition = "2021"
-  allow_unsafe = false
+  allow_unsafe = true  # BoringSSL TLS server via raw bssl_sys FFI.
   deps = [
+    "//third_party/boringssl:bssl_sys",
     "//third_party/mole:mole_core",
     "//third_party/mole/act_boring",
     "//third_party/mole/ihat_boring",

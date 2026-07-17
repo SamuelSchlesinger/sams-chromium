@@ -25,7 +25,7 @@ shoes.com and socks.com link you to each other.</p>
 <script>
 async function tick() {
   try {
-    const s = await (await fetch("http://antifraud.com/stats")).json();
+    const s = await (await fetch("https://antifraud.com/stats")).json();
     out.textContent =
       "redemptions (Redeem & Issue): " + s.redemptions + "\n" +
       "presentations (site visits):  " + s.presentations + "\n\n" +
@@ -57,6 +57,8 @@ fn main() {
     let issuance_batch: u64 = arg(&args, "--issuance-batch", "4").parse().unwrap_or(4);
     let charge: u64 = arg(&args, "--charge", "1").parse().unwrap_or(1);
     let refund: u64 = arg(&args, "--refund", "0").parse().unwrap_or(0);
+    let cert = arg(&args, "--cert", "");
+    let key = arg(&args, "--key", "");
 
     let Ok(anchor_key) = b64_decode(&anchor_key_b64) else {
         eprintln!("[mole-demo-moderator] --anchor-key must be base64url");
@@ -83,7 +85,7 @@ fn main() {
     eprintln!("MODERATOR_COMMITMENT {}", moderator.commitment_json());
 
     let addr = format!("127.0.0.1:{port}");
-    if let Err(e) = serve(&addr, |request| {
+    if let Err(e) = serve(&addr, &cert, &key, |request| {
         if request.path == "/" || request.path == "/index.html" {
             return Response {
                 status: 200,

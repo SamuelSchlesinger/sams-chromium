@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 
 use act_boring::proofs::request_context_scalar;
 use act_boring::spend::{scalar_to_u128, SpendProof};
@@ -88,8 +88,8 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+fn read_request<S: Read>(stream: &mut S) -> Option<Request> {
+    let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).ok()? == 0 {
         return None;
@@ -127,7 +127,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     Some(Request { method, path, authorization, body })
 }
 
-fn write_response(stream: &mut TcpStream, response: &Response) {
+fn write_response<W: Write>(stream: &mut W, response: &Response) {
     let mut out = format!("HTTP/1.1 {} {}\r\n", response.status, reason(response.status));
     out.push_str(&format!("Content-Length: {}\r\n", response.body.len()));
     // Permissive CORS so the site pages can drive the servers from JS if needed.
@@ -143,22 +143,151 @@ fn write_response(stream: &mut TcpStream, response: &Response) {
     let _ = stream.flush();
 }
 
-/// Serve forever on `addr`, dispatching each request to `handler`.
-pub fn serve<F: FnMut(&Request) -> Response>(addr: &str, mut handler: F) -> std::io::Result<()> {
+// A BoringSSL TLS server: real HTTPS so the browser sees a genuine secure
+// context by scheme (no --unsafely-treat-insecure-origin-as-secure). Uses the
+// in-tree BoringSSL directly through bssl_sys.
+mod tls {
+    use bssl_sys::{
+        SSL_CTX_free, SSL_CTX_new, SSL_CTX_use_PrivateKey_file,
+        SSL_CTX_use_certificate_chain_file, SSL_accept, SSL_free, SSL_new, SSL_read,
+        SSL_set_fd, SSL_shutdown, SSL_write, TLS_method, SSL, SSL_CTX,
+    };
+    use std::ffi::CString;
+    use std::io::{self, Read, Write};
+    use std::net::TcpStream;
+    use std::os::fd::AsRawFd;
+    use std::os::raw::{c_int, c_void};
+
+    // PEM file type constant (openssl/ssl.h). bssl_sys does not re-export the
+    // #define, so spell it out.
+    const SSL_FILETYPE_PEM: c_int = 1;
+
+    /// A TLS server context holding the loaded certificate and key.
+    pub struct SslContext(*mut SSL_CTX);
+
+    impl SslContext {
+        pub fn new(cert_pem: &str, key_pem: &str) -> Result<Self, String> {
+            // SAFETY: standard BoringSSL server-context setup; every raw call
+            // is checked, and the context is used single-threaded in serve().
+            unsafe {
+                let ctx = SSL_CTX_new(TLS_method());
+                if ctx.is_null() {
+                    return Err("SSL_CTX_new failed".into());
+                }
+                let cert = CString::new(cert_pem).map_err(|_| "bad cert path")?;
+                let key = CString::new(key_pem).map_err(|_| "bad key path")?;
+                if SSL_CTX_use_certificate_chain_file(ctx, cert.as_ptr()) != 1 {
+                    SSL_CTX_free(ctx);
+                    return Err(format!("cannot load certificate {cert_pem}"));
+                }
+                if SSL_CTX_use_PrivateKey_file(ctx, key.as_ptr(), SSL_FILETYPE_PEM) != 1 {
+                    SSL_CTX_free(ctx);
+                    return Err(format!("cannot load private key {key_pem}"));
+                }
+                Ok(SslContext(ctx))
+            }
+        }
+    }
+
+    impl Drop for SslContext {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is a live SSL_CTX from SSL_CTX_new.
+            unsafe { SSL_CTX_free(self.0) };
+        }
+    }
+
+    /// One accepted TLS connection; reads/writes go through the SSL object.
+    pub struct SslStream {
+        ssl: *mut SSL,
+        _tcp: TcpStream,
+    }
+
+    impl SslStream {
+        pub fn accept(ctx: &SslContext, tcp: TcpStream) -> Result<SslStream, String> {
+            // SAFETY: `ctx.0` is a live SSL_CTX; `tcp` outlives the SSL via the
+            // `_tcp` field, so the fd stays valid for the SSL's lifetime.
+            unsafe {
+                let ssl = SSL_new(ctx.0);
+                if ssl.is_null() {
+                    return Err("SSL_new failed".into());
+                }
+                SSL_set_fd(ssl, tcp.as_raw_fd());
+                if SSL_accept(ssl) != 1 {
+                    SSL_free(ssl);
+                    return Err("TLS handshake failed".into());
+                }
+                Ok(SslStream { ssl, _tcp: tcp })
+            }
+        }
+    }
+
+    impl Read for SslStream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            // SAFETY: `buf` is valid for `buf.len()` bytes; blocking socket, so
+            // SSL_read returns >0 on data, <=0 on close/error (treated as EOF).
+            let n = unsafe {
+                SSL_read(self.ssl, buf.as_mut_ptr() as *mut c_void, buf.len() as c_int)
+            };
+            Ok(if n <= 0 { 0 } else { n as usize })
+        }
+    }
+
+    impl Write for SslStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            // SAFETY: `buf` is valid for `buf.len()` bytes.
+            let n = unsafe {
+                SSL_write(self.ssl, buf.as_ptr() as *const c_void, buf.len() as c_int)
+            };
+            if n <= 0 {
+                Err(io::Error::other("SSL_write failed"))
+            } else {
+                Ok(n as usize)
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for SslStream {
+        fn drop(&mut self) {
+            // SAFETY: `self.ssl` is a live SSL from SSL_new.
+            unsafe {
+                SSL_shutdown(self.ssl);
+                SSL_free(self.ssl);
+            }
+        }
+    }
+}
+
+/// Serve HTTPS forever on `addr` with the given PEM cert/key, dispatching each
+/// request to `handler`.
+pub fn serve<F: FnMut(&Request) -> Response>(
+    addr: &str,
+    cert_pem: &str,
+    key_pem: &str,
+    mut handler: F,
+) -> std::io::Result<()> {
+    let ctx = tls::SslContext::new(cert_pem, key_pem)
+        .map_err(std::io::Error::other)?;
     let listener = TcpListener::bind(addr)?;
-    eprintln!("[mole-demo] listening on {addr}");
+    eprintln!("[mole-demo] listening (HTTPS) on {addr}");
     for stream in listener.incoming() {
-        let mut stream = match stream {
+        let tcp = match stream {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if let Some(request) = read_request(&mut stream) {
+        let mut ssl = match tls::SslStream::accept(&ctx, tcp) {
+            Ok(s) => s,
+            Err(_) => continue,  // non-TLS probe or handshake failure
+        };
+        if let Some(request) = read_request(&mut ssl) {
             let response = if request.method == "OPTIONS" {
                 Response::text(200, "")
             } else {
                 handler(&request)
             };
-            write_response(&mut stream, &response);
+            write_response(&mut ssl, &response);
         }
     }
     Ok(())

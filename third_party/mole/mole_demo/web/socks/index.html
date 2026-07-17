@@ -10,14 +10,14 @@ credential from the <b>same pool</b>: no second round-trip to redeem, and
 nothing links this visit to your shoes.com visit.</p>
 <button id=go>Verify me</button>
 <pre id=out>(not verified yet)</pre>
-<p><a href="http://anchor.com">🔒 anchor.com</a> ·
-<a href="http://shoes.com">👟 shoes.com</a> ·
-<a href="http://antifraud.com">🛡️ antifraud.com</a> (watch the counters)</p>
+<p><a href="https://anchor.com">🔒 anchor.com</a> ·
+<a href="https://shoes.com">👟 shoes.com</a> ·
+<a href="https://antifraud.com">🛡️ antifraud.com</a> (watch the counters)</p>
 <script>
 go.onclick = async () => {
   out.textContent = "verifying via antifraud.com…";
   try {
-    const body = await navigator.endorsement.challenge("http://antifraud.com/gate");
+    const body = await navigator.endorsement.challenge("https://antifraud.com/gate");
     out.textContent = "✓ verified — welcome to socks.com!\n\nantifraud.com said:\n" + body;
   } catch (e) {
     out.textContent = "✗ not verified: " + e +

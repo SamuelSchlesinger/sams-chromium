@@ -23,14 +23,14 @@ you are.</p>
 <button id=go>Get my endorsement</button>
 <pre id=out>(no endorsement yet)</pre>
 <p>Then shop at
-<a href="http://shoes.com">👟 shoes.com</a> and
-<a href="http://socks.com">🧦 socks.com</a> — both verify you through the same
+<a href="https://shoes.com">👟 shoes.com</a> and
+<a href="https://socks.com">🧦 socks.com</a> — both verify you through the same
 anti-fraud service, unlinkably.</p>
 <script>
 go.onclick = async () => {
   out.textContent = "collecting an endorsement from anchor.com…";
   try {
-    await navigator.endorsement.collect("http://anchor.com");
+    await navigator.endorsement.collect("https://anchor.com");
     out.textContent = "✓ Endorsed. Your browser now holds an anonymous "
       + "endorsement it can present anywhere — without anchor.com, shoes.com, "
       + "socks.com, or antifraud.com being able to link it back to you.";
@@ -53,13 +53,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let port = arg(&args, "--port", "8081");
     let epoch = arg(&args, "--epoch", "demo-epoch-1");
+    let cert = arg(&args, "--cert", "");
+    let key = arg(&args, "--key", "");
 
     let mut anchor = AnchorServer::new(epoch.as_bytes());
     eprintln!("ANCHOR_KEY {}", b64_encode(&anchor.public_key()));
     eprintln!("ANCHOR_COMMITMENT {}", anchor.commitment_json());
 
     let addr = format!("127.0.0.1:{port}");
-    if let Err(e) = serve(&addr, |request| {
+    if let Err(e) = serve(&addr, &cert, &key, |request| {
         if request.path == "/" || request.path == "/index.html" {
             return Response {
                 status: 200,
