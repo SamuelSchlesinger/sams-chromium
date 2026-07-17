@@ -420,6 +420,18 @@ pub struct ModeratorServer {
     seen_spend_nullifiers: HashSet<[u8; 32]>,
     pub redemptions: u64,
     pub presentations: u64,
+    /// The spend nullifiers seen, most recent first, hex — for the demo to
+    /// show what the Moderator observes: a pile of fresh one-time values it
+    /// cannot link to a credential, to each other, or to a redemption.
+    recent_nullifiers: Vec<String>,
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 impl ModeratorServer {
@@ -462,6 +474,7 @@ impl ModeratorServer {
             seen_spend_nullifiers: HashSet::new(),
             redemptions: 0,
             presentations: 0,
+            recent_nullifiers: Vec::new(),
         })
     }
 
@@ -528,9 +541,13 @@ impl ModeratorServer {
             return self.resource(&request.authorization);
         }
         if request.path == "/stats" {
+            let nullifiers: Vec<String> =
+                self.recent_nullifiers.iter().map(|n| format!("\"{n}\"")).collect();
             return Response::json(format!(
-                "{{\"redemptions\":{},\"presentations\":{}}}",
-                self.redemptions, self.presentations
+                "{{\"redemptions\":{},\"presentations\":{},\"nullifiers\":[{}]}}",
+                self.redemptions,
+                self.presentations,
+                nullifiers.join(",")
             ));
         }
         Response::text(404, "not found\n")
@@ -672,6 +689,8 @@ impl ModeratorServer {
             return self.reject();
         }
         self.presentations += 1;
+        self.recent_nullifiers.insert(0, to_hex(&spend.k.to_bytes()));
+        self.recent_nullifiers.truncate(8);
         let update = OptionalCredentialUpdate {
             update: Some(CredentialUpdate {
                 credential_type: credential_type::ACT,

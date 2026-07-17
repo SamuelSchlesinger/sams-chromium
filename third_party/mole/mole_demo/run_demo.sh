@@ -93,10 +93,14 @@ if [[ "$(uname)" == "Darwin" && "$BROWSER" == *".app/"* ]]; then
 fi
 
 echo "== launching browser =="
-echo "   Visit anchor.com -> Get endorsement, then shoes.com / socks.com -> Verify,"
-echo "   and watch antifraud.com's counters (1 redemption, N unlinkable presentations)."
+echo "   Visit anchor.com -> Get endorsement, then shoes.com / socks.com -> Verify."
+echo "   DevTools: open  http://localhost:9222  in another browser, pick the tab,"
+echo "   and use the Network tab to watch the 'Mole' exchanges (the Authorization:"
+echo "   Mole request headers and Mole-Credential responses are the credentials on"
+echo "   the wire). antifraud.com only ever sees a fresh, unlinkable nullifier."
 "$BROWSER" \
   --user-data-dir="$TMP/profile" \
+  --remote-debugging-port=9222 \
   --host-resolver-rules="MAP anchor.com 127.0.0.1:8081,MAP antifraud.com 127.0.0.1:8080,MAP shoes.com 127.0.0.1:8082,MAP socks.com 127.0.0.1:8083" \
   --ignore-certificate-errors-spki-list="$SPKI" \
   --enable-blink-features=ModeratedEndorsements \

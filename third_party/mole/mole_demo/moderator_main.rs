@@ -12,28 +12,33 @@ use mole_demo::{serve, ModeratorServer, Response};
 
 const PAGE: &str = r#"<!doctype html>
 <meta charset=utf-8><title>antifraud.com — the shared moderator</title>
-<style>body{font:16px system-ui;max-width:40em;margin:3em auto;padding:0 1em}
-pre{background:#f4f4f4;padding:1em}b{color:#06c}</style>
+<style>body{font:16px system-ui;max-width:44em;margin:3em auto;padding:0 1em}
+pre{background:#f4f4f4;padding:1em;overflow-x:auto}b{color:#06c}</style>
 <h1>🛡️ antifraud.com</h1>
-<p>The <b>anti-fraud moderator</b> shared by shoes.com and socks.com. It redeems
-one endorsement into a pool of anonymous credentials, and verifies a fresh
-credential on each visit. The counters below are the whole privacy story:</p>
+<p>The <b>anti-fraud moderator</b> shared by shoes.com and socks.com. Below is
+<b>everything it sees</b>. It vouches for you across sites, and — the whole
+point — it <b>cannot</b> tell those visits apart, link them to you, or count how
+often <i>you</i> used a credential.</p>
 <pre id=out>loading…</pre>
-<p><b>One redemption</b> vets you once. <b>Many presentations</b> — one per site
-visit — and antifraud.com <b>cannot tell they are the same person</b>, nor can
-shoes.com and socks.com link you to each other.</p>
 <script>
 async function tick() {
   try {
     const s = await (await fetch("https://antifraud.com/stats")).json();
-    out.textContent =
-      "redemptions (Redeem & Issue): " + s.redemptions + "\n" +
-      "presentations (site visits):  " + s.presentations + "\n\n" +
-      (s.redemptions <= 1 && s.presentations >= 2
-        ? "→ " + s.presentations + " unlinkable visits from " + s.redemptions +
-          " redemption. antifraud.com cannot correlate them."
-        : "");
-  } catch (e) { out.textContent = "stats unavailable: " + e; }
+    let out_lines = [];
+    out_lines.push("verification requests it has handled: " + s.presentations);
+    out_lines.push("");
+    out_lines.push("what each one carried — a fresh one-time nullifier:");
+    if (!s.nullifiers.length) out_lines.push("  (none yet — go Verify on a site)");
+    for (const n of s.nullifiers) out_lines.push("  " + n);
+    out_lines.push("");
+    out_lines.push("It CANNOT: link any two of these, chain them to one");
+    out_lines.push("credential, or tie them to you. They are unlinkable by");
+    out_lines.push("construction. The number above is just its own traffic");
+    out_lines.push("volume — not a per-user or per-credential tally.");
+    document.getElementById("out").textContent = out_lines.join("\n");
+  } catch (e) {
+    document.getElementById("out").textContent = "stats unavailable: " + e;
+  }
 }
 tick(); setInterval(tick, 1000);
 </script>
