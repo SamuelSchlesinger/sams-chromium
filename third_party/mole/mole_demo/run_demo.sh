@@ -105,6 +105,7 @@ echo "   the wire). antifraud.com only ever sees a fresh, unlinkable nullifier."
   --ignore-certificate-errors-spki-list="$SPKI" \
   --enable-blink-features=ModeratedEndorsements \
   --mole-key-commitments="$COMMITMENTS" \
+  ${MOLE_DEMO_BROWSER_ARGS:-} \
   https://anchor.com
 
 echo "== browser closed; shutting down servers =="

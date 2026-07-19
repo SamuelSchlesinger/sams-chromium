@@ -16,28 +16,33 @@ const PAGE: &str = r#"<!doctype html>
 button{font:inherit;padding:.5em 1em}pre{background:#f4f4f4;padding:1em;white-space:pre-wrap}
 a{color:#06c}</style>
 <h1>🔒 anchor.com</h1>
-<p>Your <b>identity provider</b> — think of a bank or a government ID service.
-It can vouch that you are a real, unique person by issuing an
-<b>unlinkable endorsement</b> your browser stores. Nobody downstream learns who
-you are.</p>
-<button id=go>Get my endorsement</button>
-<pre id=out>(no endorsement yet)</pre>
-<p>Then shop at
+<p>anchor.com is an identity provider, the kind of site that already knows you
+are a real, distinct person: a bank, say, or a government ID service. Ask it
+for an endorsement and it hands one to your browser. You can show that
+endorsement to other sites to prove you are a real person, and they still
+cannot tell who you are.</p>
+<p>You are signed in here, so anchor.com endorses your browser on its own,
+just because you loaded this page. No button, no CAPTCHA.</p>
+<pre id=out>issuing your endorsement…</pre>
+<p>Then try
 <a href="https://shoes.com">👟 shoes.com</a> and
-<a href="https://socks.com">🧦 socks.com</a> — both verify you through the same
-anti-fraud service, unlinkably.</p>
+<a href="https://socks.com">🧦 socks.com</a>. Both check visitors through the
+same anti-fraud service, and neither one can tell it is you.</p>
 <script>
-go.onclick = async () => {
-  out.textContent = "collecting an endorsement from anchor.com…";
+window.addEventListener("load", async () => {
+  if (!navigator.endorsement) {
+    out.textContent = "navigator.endorsement is unavailable in this browser.";
+    return;
+  }
   try {
     await navigator.endorsement.collect("https://anchor.com");
-    out.textContent = "✓ Endorsed. Your browser now holds an anonymous "
-      + "endorsement it can present anywhere — without anchor.com, shoes.com, "
-      + "socks.com, or antifraud.com being able to link it back to you.";
+    out.textContent = "✓ Done. Your browser now holds an endorsement. It can "
+      + "present this at other sites, and none of them can trace it back to "
+      + "you, not even anchor.com.";
   } catch (e) {
     out.textContent = "✗ collect() failed: " + e;
   }
-};
+});
 </script>
 "#;
 

@@ -15,10 +15,10 @@ const PAGE: &str = r#"<!doctype html>
 <style>body{font:16px system-ui;max-width:44em;margin:3em auto;padding:0 1em}
 pre{background:#f4f4f4;padding:1em;overflow-x:auto}b{color:#06c}</style>
 <h1>🛡️ antifraud.com</h1>
-<p>The <b>anti-fraud moderator</b> shared by shoes.com and socks.com. Below is
-<b>everything it sees</b>. It vouches for you across sites, and — the whole
-point — it <b>cannot</b> tell those visits apart, link them to you, or count how
-often <i>you</i> used a credential.</p>
+<p>antifraud.com is the anti-fraud service that shoes.com and socks.com both
+use. Everything it can see about you appears below. It can confirm you are
+vouched for, but it cannot link your visits to each other or trace any of them
+back to you.</p>
 <pre id=out>loading…</pre>
 <script>
 async function tick() {
@@ -27,14 +27,14 @@ async function tick() {
     let out_lines = [];
     out_lines.push("verification requests it has handled: " + s.presentations);
     out_lines.push("");
-    out_lines.push("what each one carried — a fresh one-time nullifier:");
-    if (!s.nullifiers.length) out_lines.push("  (none yet — go Verify on a site)");
+    out_lines.push("each one carried a one-time value, shown here once:");
+    if (!s.nullifiers.length) out_lines.push("  (none yet; click Verify on a site)");
     for (const n of s.nullifiers) out_lines.push("  " + n);
     out_lines.push("");
-    out_lines.push("It CANNOT: link any two of these, chain them to one");
-    out_lines.push("credential, or tie them to you. They are unlinkable by");
-    out_lines.push("construction. The number above is just its own traffic");
-    out_lines.push("volume — not a per-user or per-credential tally.");
+    out_lines.push("Each value appears once and never again. antifraud.com has");
+    out_lines.push("no way to connect two of them, or to connect any of them to");
+    out_lines.push("a credential or a person. The count above only says how many");
+    out_lines.push("requests it has served.");
     document.getElementById("out").textContent = out_lines.join("\n");
   } catch (e) {
     document.getElementById("out").textContent = "stats unavailable: " + e;

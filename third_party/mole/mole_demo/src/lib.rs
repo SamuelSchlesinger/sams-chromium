@@ -704,7 +704,7 @@ impl ModeratorServer {
                 "Mole-Credential".into(),
                 MoleCredential::Update(update.to_bytes()).to_header_value(),
             )],
-            body: b"access granted: you are vouched-for, unlinkably\n".to_vec(),
+            body: b"access granted: you are vouched for\n".to_vec(),
         }
     }
 }
