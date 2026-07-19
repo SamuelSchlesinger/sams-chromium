@@ -1,0 +1,19 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// The Moderated Endorsements user-agent client: collect() runs the MoLE
+// endorsement grant against the document's site (an Anchor); challenge()
+// fetches a Moderator-protected resource, redeeming an endorsement for a
+// pool of anonymous credentials and presenting one as needed.
+// https://github.com/Moderation-of-unLinkable-Endorsements/web-draft
+[
+  Exposed=Window,
+  SecureContext,
+  RuntimeEnabled=ModeratedEndorsements
+] interface ModeratedEndorsements {
+  [CallWith=ScriptState, RaisesException] Promise<undefined> collect(
+      USVString url);
+  [CallWith=ScriptState, RaisesException] Promise<DOMString> challenge(
+      USVString url);
+};

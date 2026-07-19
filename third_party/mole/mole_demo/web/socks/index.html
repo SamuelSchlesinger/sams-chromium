@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset=utf-8><title>socks.com</title>
+<style>body{font:16px system-ui;max-width:40em;margin:3em auto;padding:0 1em}
+pre{background:#f4f4f4;padding:1em;white-space:pre-wrap}
+a{color:#06c}</style>
+<h1>🧦 socks.com</h1>
+<p>Different store, same anti-fraud service: antifraud.com again. If your
+browser was verified at shoes.com, it uses another credential from the same
+batch it collected then. It does not redeem a second time, and this visit
+cannot be linked to your shoes.com visit.</p>
+<p>Like shoes.com, the check runs by itself when the page loads.</p>
+<pre id=out>checking that you are a real person…</pre>
+<p><a href="https://anchor.com">🔒 anchor.com</a> ·
+<a href="https://shoes.com">👟 shoes.com</a> ·
+<a href="https://antifraud.com">🛡️ antifraud.com</a> (watch the counters)</p>
+<script>
+window.addEventListener("load", async () => {
+  if (!navigator.endorsement) {
+    out.textContent = "navigator.endorsement is unavailable in this browser.";
+    return;
+  }
+  try {
+    const body = await navigator.endorsement.challenge("https://antifraud.com/gate");
+    out.textContent = "✓ verified. Welcome to socks.com.\n\nantifraud.com said:\n" + body;
+  } catch (e) {
+    out.textContent = "✗ We could not verify you. On a real site you would see "
+      + "a CAPTCHA here instead.\n\nVisit anchor.com first to collect an "
+      + "endorsement, then reload.";
+  }
+});
+</script>

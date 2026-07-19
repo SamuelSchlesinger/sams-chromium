@@ -1,0 +1,15 @@
+[package]
+name = "mole-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared MoLE protocol machinery: wire encoding, Mole HTTP authentication scheme, configuration formats"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+# SHA-256 (key ids, challenge digests) comes from sigma_boring's BoringSSL
+# wrapper; expressed as a GN dep in //third_party/mole:mole_core, since it
+# needs in-tree BoringSSL and is not a Cargo-buildable crate.

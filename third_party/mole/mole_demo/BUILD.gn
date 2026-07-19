@@ -1,0 +1,47 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# A runnable MoLE demo: standalone Anchor and Moderator HTTP servers on the
+# same first-party BoringSSL crypto the browser uses, so their wire format is
+# byte-compatible with //components/moderated_endorsements. Host tools, not
+# shipped in the browser. See run_demo.sh + web/ for the full demo.
+
+import("//build/rust/rust_executable.gni")
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("mole_demo") {
+  crate_name = "mole_demo"
+  crate_root = "src/lib.rs"
+  sources = [ "src/lib.rs" ]
+  edition = "2021"
+  allow_unsafe = true  # BoringSSL TLS server via raw bssl_sys FFI.
+  deps = [
+    "//third_party/boringssl:bssl_sys",
+    "//third_party/mole:mole_core",
+    "//third_party/mole/act_boring",
+    "//third_party/mole/ihat_boring",
+    "//third_party/mole/sigma_boring",
+    "//third_party/rust/serde_json/v1:lib",
+  ]
+}
+
+rust_executable("mole_demo_anchor") {
+  crate_root = "anchor_main.rs"
+  sources = [ "anchor_main.rs" ]
+  edition = "2021"
+  deps = [
+    ":mole_demo",
+    "//third_party/mole:mole_core",
+  ]
+}
+
+rust_executable("mole_demo_moderator") {
+  crate_root = "moderator_main.rs"
+  sources = [ "moderator_main.rs" ]
+  edition = "2021"
+  deps = [
+    ":mole_demo",
+    "//third_party/mole:mole_core",
+  ]
+}

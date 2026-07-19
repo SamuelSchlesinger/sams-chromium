@@ -4157,6 +4157,17 @@
       name: "MobileLayoutTheme",
     },
     {
+      // navigator.endorsement (MoLE, Moderation of unLinkable Endorsements).
+      name: "ModeratedEndorsements",
+      status: "experimental",
+      // Enablable per-origin via a signed Origin Trial token, in addition to
+      // --enable-blink-features=ModeratedEndorsements for local dev. The trial
+      // name must be registered with the Origin Trials framework before tokens
+      // validate (see the launch-review runbook).
+      origin_trial_feature_name: "ModeratedEndorsements",
+      public: true,
+    },
+    {
       name: "ModifyParagraphCrossEditingoundary",
       status: "stable",
     },

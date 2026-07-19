@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Samuel Schlesinger <sgschlesinger@gmail.com>
+Date: Thu, 16 Jul 2026 02:00:00 +0000
+Subject: [PATCH] Drop dev-dependencies and cfg(doc) dependencies
+
+Never built for a vendored crate, but their edges into test-only and
+removed crates misclassify the crate into the testonly privilege group.
+---
+diff --git a/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml b/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml
+index 3a8722b1097e8..d6a30bae4733c 100644
+--- a/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml
++++ b/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml
+@@ -212,63 +212,11 @@ version = "^1.8.1"
+ features = ["zeroize_derive"]
+ optional = true
+ 
+-[dev-dependencies.ark-bls12-381]
+-version = "^0.6"
+-
+-[dev-dependencies.ark-curve25519]
+-version = "^0.6"
+-
+-[dev-dependencies.ark-pallas]
+-version = "^0.6"
+-
+-[dev-dependencies.ark-secp256k1]
+-version = "^0.6"
+-
+-[dev-dependencies.ark-secp256r1]
+-version = "^0.6"
+-
+-[dev-dependencies.ark-std]
+-version = "^0.6"
+-
+-[dev-dependencies.ark-vesta]
+-version = "^0.6"
+-
+-[dev-dependencies.blake2]
+-version = "0.11.0-rc.5"
+-
+-[dev-dependencies.bls12_381]
+-version = "^0.8.0"
+-
+-[dev-dependencies.curve25519-dalek]
+-version = "^4.1"
+-
+-[dev-dependencies.hex]
+-version = "0.4.3"
+-
+-[dev-dependencies.libtest-mimic]
+-version = "0.8.1"
+-
+-[dev-dependencies.pallas]
+-version = "^0.35.0"
+-
+-[dev-dependencies.serde]
+-version = "1.0"
+-features = ["derive"]
+-
+-[dev-dependencies.serde_json]
+-version = "1.0"
+-
+-[dev-dependencies.sha2]
+-version = "0.11.0"
+-
+-[dev-dependencies.sha3]
+-version = "=0.11.0-rc.9"
+-
+-[target."cfg(doc)".dependencies.p3-koala-bear]
+-version = "0.5"
+-
+-[target."cfg(doc)".dependencies.sha2]
+-version = "0.11.0"
++# The [dev-dependencies.*] and [target."cfg(doc)".dependencies.*] tables were
++# removed by a Chromium patch (see
++# //third_party/rust/chromium_crates_io/patches/spongefish-v0_7): they are
++# never built for a vendored crate, but their edges into test-only and
++# removed crates would misclassify this crate's privilege group.
+ 
+ [lints.clippy]
+ cast_possible_truncation = "allow"

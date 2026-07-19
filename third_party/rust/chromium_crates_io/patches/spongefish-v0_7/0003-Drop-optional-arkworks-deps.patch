@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Samuel Schlesinger <sgschlesinger@gmail.com>
+Date: Thu, 16 Jul 2026 03:00:00 +0000
+Subject: [PATCH] Drop the never-enabled optional arkworks dependencies
+
+Cargo.lock resolution is feature-agnostic, so even never-activated
+optional dependencies resolve into the lock; the arkworks crates are
+placeholder-removed in Chromium and classified test-only, which would
+misclassify this crate. Chromium never enables the ark features.
+---
+diff --git a/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml b/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml
+index d6a30bae4733c..b011c114054ac 100644
+--- a/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml
++++ b/third_party/rust/chromium_crates_io/vendor/spongefish-v0_7/Cargo.toml
+@@ -40,19 +40,8 @@ rustdoc-args = [
+ ]
+ 
+ [features]
+-ark-ec = [
+-    "ark-ff",
+-    "dep:ark-ec",
+-]
+-ark-ff = [
+-    "dep:ark-ff",
+-    "dep:ark-serialize",
+-]
+ ascon = ["dep:ascon"]
+-asm = [
+-    "keccak?/asm",
+-    "ark-ff?/asm",
+-]
++asm = ["keccak?/asm"]
+ blake2 = ["dep:blake2"]
+ blake3 = ["dep:blake3"]
+ bls12_381 = ["dep:bls12_381"]
+@@ -81,11 +70,7 @@ p3-mersenne-31 = [
+ risc0-zkp = ["dep:risc0-zkp"]
+ sha2 = ["dep:sha2"]
+ sha3 = ["dep:sha3"]
+-std = [
+-    "ark-ff?/std",
+-    "ark-ec?/std",
+-    "ark-serialize?/std",
+-]
++std = []
+ yolocrypto = []
+ zeroize = ["dep:zeroize"]
+ 
+@@ -101,11 +86,6 @@ required-features = [
+     "curve25519-dalek/rand_core",
+ ]
+ 
+-[[example]]
+-name = "schnorr"
+-path = "examples/schnorr.rs"
+-required-features = ["ark-ec"]
+-
+ [[test]]
+ name = "derive_generics"
+ path = "tests/derive_generics.rs"
+@@ -114,18 +94,6 @@ path = "tests/derive_generics.rs"
+ name = "test_spec"
+ path = "tests/test_spec.rs"
+ 
+-[dependencies.ark-ec]
+-version = "^0.6"
+-optional = true
+-
+-[dependencies.ark-ff]
+-version = "^0.6"
+-optional = true
+-
+-[dependencies.ark-serialize]
+-version = "^0.6"
+-optional = true
+-
+ [dependencies.ascon]
+ version = "^0.4.0"
+ optional = true

@@ -1,0 +1,37 @@
+Name: MoLE cryptographic stack (sigma-proofs, ihat-rs, anonymous-credit-tokens, mole-core)
+Short Name: mole
+URL: https://github.com/SamuelSchlesinger/sigma-proofs
+URL: https://github.com/Moderation-of-unLinkable-Endorsements/ihat-rs
+URL: https://github.com/SamuelSchlesinger/anonymous-credit-tokens
+URL: https://github.com/Moderation-of-unLinkable-Endorsements/instantiation
+Version: N/A
+License: Apache-2.0, MIT
+License File: sigma-proofs/LICENSE-APACHE, ihat-rs/LICENSE-APACHE, anonymous-credit-tokens/LICENSE
+Security Critical: no
+Shipped: no
+
+Description:
+The cryptographic implementations behind the MoLE (Moderation of unLinkable
+Endorsements) architecture demo:
+
+  * sigma-proofs: sigma protocols and Fiat-Shamir NIZKs (the `act-protocol-id`
+    branch, which lets ACT set the Fiat-Shamir protocol identifier its
+    specification mandates).
+  * ihat-rs: IHAT, pairing-free issuer-hiding anonymous tokens over NIST
+    P-256; the MoLE endorsement protocol (type 0x0002).
+  * anonymous-credit-tokens: ACT, an anonymous credit scheme over
+    ristretto255; the MoLE credential protocol (type 0x0001).
+  * mole-core: shared protocol machinery from the MoLE instantiation — the
+    TLS-presentation-language wire encoding, the `Mole` HTTP authentication
+    scheme, and the directory configuration formats. Vendored so the
+    in-browser client is byte-compatible with the mole-anchor /
+    mole-moderator servers.
+
+Local Modifications:
+Only `src/`, `Cargo.toml`, licenses, and READMEs are vendored (no benches,
+examples, or workspace siblings). anonymous-credit-tokens carries the
+`sigma-features-trim` branch change restricting sigma-proofs to its
+ristretto255 backend.
+
+This is experimental, unaudited cryptography vendored for a local
+demonstration. Not for production use.

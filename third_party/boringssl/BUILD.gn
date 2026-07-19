@@ -95,6 +95,16 @@ if (enable_rust) {
 
     visibility = [
       ":*",  # private, should only be exposed through bssl_crypto
+
+      # The MoLE sigma-protocol layer needs raw P-256 group/scalar arithmetic
+      # (and, later, a Keccak-f1600 permutation) that bssl_crypto does not
+      # expose. Reviewed unsafe FFI, scoped to the one sigma target. NEEDS
+      # BORINGSSL OWNERS SIGN-OFF (precedent: the athm-pvt grant).
+      "//third_party/mole/sigma_boring:*",
+
+      # The MoLE demo servers (dev-only, not shipped) run a BoringSSL TLS
+      # listener so the demo speaks real HTTPS. Also OWNERS-gated.
+      "//third_party/mole/mole_demo:*",
     ]
 
     bindgen_deps = [ ":raw_bssl_sys_bindings" ]
@@ -153,6 +163,16 @@ if (is_msan) {
 
 component("boringssl") {
   sources = rebase_path(all_sources, ".", "src")
+
+  # MoLE: constant-time P-256 EC_SCALAR exposure shim. Compiled INTO the
+  # component so it can call the internal (unexported) bssl::ec_scalar_*
+  # directly, re-exporting MOLE_p256_scalar_* under a stable default-visibility
+  # ABI for //third_party/mole/sigma_boring. `include_dirs` reaches the internal
+  # headers (openssl/* already come via :external_config). NEEDS OWNERS
+  # SIGN-OFF.
+  sources += [ "mole_p256_scalar_shim.cc" ]
+  include_dirs = [ "src" ]
+
   public = rebase_path(all_headers, ".", "src")
   friend = [ ":*" ]
   deps = [ "//third_party/boringssl/src/third_party/fiat:fiat_license" ]
@@ -179,6 +199,23 @@ component("boringssl") {
     ldflags = [ "-Wl,--version-script=" +
                 rebase_path(version_script, root_build_dir) ]
   }
+}
+
+# MoLE crypto exposure shim: re-exports BoringSSL's internal Keccak-f1600
+# permutation (and, later, EC_SCALAR arithmetic) under a stable ABI for the
+# MoLE sigma-protocol layer, which needs primitives bssl_crypto does not
+# expose. Scoped to that one consumer. NEEDS BORINGSSL OWNERS SIGN-OFF.
+source_set("mole_crypto_shim") {
+  visibility = [ "//third_party/mole/sigma_boring:*" ]
+  sources = [ "mole_keccak_shim.cc" ]
+  include_dirs = [
+    "src",
+    "src/include",
+  ]
+  configs += [ ":internal_config" ]
+  configs -= [ "//build/config/compiler:chromium_code" ]
+  configs += [ "//build/config/compiler:no_chromium_code" ]
+  deps = [ ":boringssl" ]
 }
 
 if (build_with_chromium) {

@@ -1,0 +1,27 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# act_boring: the ACT(P-256, SHAKE128) ciphersuite over BoringSSL (via
+# //third_party/mole/sigma_boring), the first-party port of
+# anonymous-credit-tokens off the ristretto255 / curve25519-dalek stack.
+
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("act_boring") {
+  crate_name = "act_boring"
+  crate_root = "src/lib.rs"
+  sources = [
+    "src/issuance.rs",
+    "src/lib.rs",
+    "src/params.rs",
+    "src/proofs.rs",
+    "src/range.rs",
+    "src/spend.rs",
+    "src/wire.rs",
+  ]
+  edition = "2021"
+  deps = [ "//third_party/mole/sigma_boring" ]
+
+  build_native_rust_unit_tests = true
+}
