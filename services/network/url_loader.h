@@ -41,6 +41,7 @@
 #include "services/network/devtools_durable_msg.h"
 #include "services/network/keepalive_statistics_recorder.h"
 #include "services/network/local_network_access_url_loader_interceptor.h"
+#include "services/network/moderated_endorsements/mole_url_loader_interceptor.h"
 #include "services/network/network_service.h"
 #include "services/network/observer_wrapper.h"
 #include "services/network/partial_decoder.h"
@@ -48,6 +49,7 @@
 #include "services/network/public/cpp/initiator_lock_compatibility.h"
 #include "services/network/public/cpp/orb/orb_api.h"
 #include "services/network/public/cpp/permissions_policy/permissions_policy.h"
+#include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/accept_ch_frame_observer.mojom.h"
 #include "services/network/public/mojom/client_security_state.mojom.h"
 #include "services/network/public/mojom/cookie_access_observer.mojom.h"
@@ -374,6 +376,12 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) URLLoader
   // step.
   void OnDoneFinalizingTrustTokenOperation(net::Error error);
 
+  // Outbound and inbound hooks for Moderated Endorsements (MOLE).
+  void ProcessOutboundMoleInterceptor();
+  void OnDoneBeginningMoleOperation(net::HttpRequestHeaders headers_to_attach);
+  void ContinueResponseAfterMole(
+      MoleUrlLoaderInterceptor::ResponseAction action);
+
   // Continuation of `OnResponseStarted` after possibly asynchronously
   // concluding the request's Trust Tokens operations.
   void ContinueOnResponseStarted();
@@ -412,6 +420,9 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) URLLoader
   void ResumeStart();
   void OnBeforeSendHeadersComplete(
       net::NetworkDelegate::OnBeforeStartTransactionCallback callback,
+      std::optional<net::HttpRequestHeaders> fallback_headers,
+      net::HttpRequestHeaders pre_header_client_headers,
+      bool disallow_cookies,
       int result,
       const std::optional<net::HttpRequestHeaders>& headers,
       std::optional<base::DictValue> extended_net_log_events);
@@ -726,6 +737,13 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) URLLoader
 
   // DevTools Durable Message instances, if enabled.
   std::unique_ptr<DevtoolsDurableMessageWriter> durable_message_writer_;
+
+  // Saved parameters and interceptor for Moderated Endorsements (MOLE).
+  const net::NetworkTrafficAnnotationTag traffic_annotation_;
+  const raw_ptr<SharedDictionaryManager> shared_dictionary_manager_;
+  const raw_ref<SharedResourceChecker> shared_resource_checker_;
+  std::unique_ptr<MoleUrlLoaderInterceptor> mole_interceptor_;
+  std::optional<ResourceRequest> mole_retry_request_;
 
   // Whether Sec-Private-Verification-Token was removed from this request
   // because cookies were included.

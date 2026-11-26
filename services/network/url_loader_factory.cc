@@ -96,6 +96,7 @@ URLLoaderFactory::URLLoaderFactory(
       cors_url_loader_factory_(cors_url_loader_factory),
       cookie_observer_(std::move(params_->cookie_observer)),
       trust_token_observer_(std::move(params_->trust_token_observer)),
+      mole_observer_(std::move(params_->mole_observer)),
       devtools_observer_(std::move(params_->devtools_observer)),
       device_bound_session_observer_(
           params_->device_bound_session_observer
@@ -432,6 +433,10 @@ URLLoaderFactory::GetIsolatedTransactionFactory(
     const base::UnguessableToken& throttling_profile_id,
     const GURL& url) const {
   return context_->GetIsolatedTransactionFactory(throttling_profile_id, url);
+}
+
+mojom::MoleAuthObserver* URLLoaderFactory::GetMoleAuthObserver() const {
+  return mole_observer_.is_bound() ? mole_observer_.get() : nullptr;
 }
 
 mojom::URLLoaderNetworkServiceObserver*

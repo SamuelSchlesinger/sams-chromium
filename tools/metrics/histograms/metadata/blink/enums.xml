@@ -7100,6 +7100,7 @@ Called by update_permissions_policy_enum.py.-->
   <int value="149" label="PublicKeyCredentialsRemoteClientDataJson"/>
   <int value="150" label="UnboundedElement"/>
   <int value="151" label="SemanticEmbedder"/>
+  <int value="152" label="ModeratedEndorsements"/>
 </enum>
 
 <!-- LINT.IfChange(FedCmAccountChooserResult) -->

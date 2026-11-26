@@ -73,4 +73,8 @@ URLLoaderContextForTests::GetIsolatedTransactionFactory(
   return nullptr;
 }
 
+mojom::MoleAuthObserver* URLLoaderContextForTests::GetMoleAuthObserver() const {
+  return nullptr;
+}
+
 }  // namespace network

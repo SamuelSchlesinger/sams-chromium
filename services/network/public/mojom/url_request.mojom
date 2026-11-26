@@ -25,6 +25,7 @@ import "services/network/public/mojom/http_request_headers.mojom";
 import "services/network/public/mojom/http_response_headers.mojom";
 import "services/network/public/mojom/ip_address_space.mojom";
 import "services/network/public/mojom/isolation_info.mojom";
+import "services/network/public/mojom/moderated_endorsements.mojom";
 import "services/network/public/mojom/network_param.mojom";
 import "services/network/public/mojom/permissions_policy/permissions_policy.mojom";
 import "services/network/public/mojom/referrer_policy.mojom";
@@ -564,6 +565,10 @@ struct URLRequest {
   // and the request has set the trustToken Fetch parameter, denoting that it
   // wishes to execute a Trust Tokens protocol operation.
   TrustTokenParams? trust_token_params;
+
+  // Set when Moderated Endorsements (MOLE) is opted in on Fetch
+  // (`fetch(url, { moderated })`) or `<form moderated>`.
+  MoleRequestParams? mole_params;
 
   // Set for WebBundle related requests. See the comment of WebBundleTokenParams
   // for details.

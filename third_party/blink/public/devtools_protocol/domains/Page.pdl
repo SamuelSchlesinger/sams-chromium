@@ -142,6 +142,7 @@ domain Page
       media-playback-while-not-visible
       microphone
       midi
+      moderated-endorsements
       on-device-speech-recognition
       otp-credentials
       payment

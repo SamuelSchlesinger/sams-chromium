@@ -1,0 +1,84 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+module network.mojom;
+
+import "services/network/public/mojom/http_request_headers.mojom";
+import "url/mojom/origin.mojom";
+import "url/mojom/url.mojom";
+
+// Controls how the browser attaches Moderated Endorsements (MOLE) clearance
+// credentials on an opted-in Fetch or `<form moderated>` navigation request.
+enum MoleModerationBehavior {
+  // Attach proactively when policy is cached, or answer a 401/403/429
+  // `Mole-Challenge` / `WWW-Authenticate: Mole` automatically in 1 retry.
+  kAuto = 0,
+  // Only spend a credential after receiving an explicit Origin challenge.
+  kChallengeOnly = 1,
+};
+
+// Declarative request parameters attached to `network::ResourceRequest` by
+// `fetch(url, { moderated })` or `<form moderated>`.
+struct MoleRequestParams {
+  // Optional preferred Moderator HTTPS origin (`https://moderator.example`).
+  url.mojom.Origin? moderator;
+
+  // Proactive vs challenge-only behavior.
+  MoleModerationBehavior behavior = MoleModerationBehavior.kAuto;
+
+  // Optional caller-specified ceiling on spend cost `s` (`0` means policy default).
+  uint32 max_cost = 0;
+
+  // Whether the caller allows `202 Accepted` deferred behavioral refunds.
+  bool allow_deferred_update = true;
+};
+
+// Per-presentation finalizer bound by the Browser Process so `URLLoader`
+// settles write-ahead state using ground-truth `wire_bytes_sent` and stripped
+// Origin response headers (`Mole-Info` / `Mole-Credential`).
+interface MoleResponseFinalizer {
+  // Invoked when response headers arrive from the Origin (before stripping).
+  OnOriginResponse(int32 http_status,
+                   string? mole_info_header,
+                   string? mole_credential_header,
+                   bool wire_bytes_sent) => ();
+
+  // Invoked on transport failure, redirect abort, or `URLLoader` destruction
+  // if `OnOriginResponse` did not already settle the presentation.
+  OnAbortedOrCompleted(int32 net_error, bool wire_bytes_sent);
+};
+
+// Implemented by `content::ModeratedEndorsementsManager` in the Browser Process
+// and bound on `URLLoaderFactoryParams::mole_observer`.
+interface MoleAuthObserver {
+  // Invoked before `URLLoader` starts a request carrying `mole_params`.
+  // Returns `headers_to_attach` (such as proactive `Sec-Mole-Authorization` or
+  // `Sec-Mole-Grease`) and an optional `finalizer` for response/abort tracking.
+  OnMoleOutboundRequest(
+      url.mojom.Url request_url,
+      string method,
+      url.mojom.Origin top_frame_origin,
+      MoleRequestParams params)
+      => (HttpRequestHeaders headers_to_attach,
+          pending_remote<MoleResponseFinalizer>? finalizer);
+
+  // Invoked at most once per `URLLoader` when an opted-in request receives a
+  // `401`, `403`, or `429` carrying `Mole-Challenge` or `WWW-Authenticate: Mole`.
+  // When `should_retry` is true, `URLLoader` restarts the request once with
+  // `retry_headers` (`Sec-Mole-Authorization` / `Authorization: Mole`).
+  OnMoleChallengeReceived(
+      url.mojom.Url request_url,
+      string method,
+      url.mojom.Origin top_frame_origin,
+      MoleRequestParams params,
+      int32 http_status,
+      string? mole_challenge_header,
+      array<string> www_authenticate_mole_headers)
+      => (bool should_retry,
+          HttpRequestHeaders retry_headers,
+          pending_remote<MoleResponseFinalizer>? finalizer);
+
+  // Clones the observer pipe.
+  Clone(pending_receiver<MoleAuthObserver> listener);
+};

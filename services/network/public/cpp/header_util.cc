@@ -187,6 +187,14 @@ bool ContainsForbiddenSecurityHeader(net::HttpRequestHeaders& headers,
 
   net::HttpRequestHeaders::Iterator it(headers);
   while (it.GetNext()) {
+    if (base::EqualsCaseInsensitiveASCII(
+            it.name(), net::HttpRequestHeaders::kAuthorization) &&
+        IsMoleAuthorizationHeaderValue(it.value())) {
+      if (out_forbidden_header_name) {
+        *out_forbidden_header_name = std::string(it.name());
+      }
+      return true;
+    }
     if (base::StartsWith(it.name(), "Sec-",
                          base::CompareCase::INSENSITIVE_ASCII)) {
       if (!sanitize_and_check_security_header(it.name(), it.value())) {
@@ -202,6 +210,38 @@ bool ContainsForbiddenSecurityHeader(net::HttpRequestHeaders& headers,
     headers.SetHeader(name, value);
   }
 
+  return false;
+}
+
+bool IsMoleAuthorizationHeaderValue(std::string_view value) {
+  constexpr std::string_view kMoleScheme = "mole";
+  std::string_view trimmed = net::HttpUtil::TrimLWS(value);
+  if (trimmed.size() < kMoleScheme.size()) {
+    return false;
+  }
+  if (!base::EqualsCaseInsensitiveASCII(trimmed.substr(0, kMoleScheme.size()),
+                                        kMoleScheme)) {
+    return false;
+  }
+  return trimmed.size() == kMoleScheme.size() ||
+         net::HttpUtil::IsLWS(trimmed[kMoleScheme.size()]);
+}
+
+bool ContainsForbiddenMoleHeader(const net::HttpRequestHeaders& headers,
+                                 std::string* out_forbidden_header_name) {
+  for (const auto& pair : headers.GetHeaderVector()) {
+    if (base::StartsWith(pair.key, "sec-mole-",
+                         base::CompareCase::INSENSITIVE_ASCII) ||
+        base::EqualsCaseInsensitiveASCII(pair.key, "Sec-Want-Endorsement") ||
+        (base::EqualsCaseInsensitiveASCII(
+             pair.key, net::HttpRequestHeaders::kAuthorization) &&
+         IsMoleAuthorizationHeaderValue(pair.value))) {
+      if (out_forbidden_header_name) {
+        *out_forbidden_header_name = pair.key;
+      }
+      return true;
+    }
+  }
   return false;
 }
 

@@ -15,6 +15,7 @@
 #include "services/network/public/mojom/cookie_access_observer.mojom.h"
 #include "services/network/public/mojom/device_bound_sessions.mojom.h"
 #include "services/network/public/mojom/devtools_observer.mojom.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/trust_token_access_observer.mojom.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
@@ -91,6 +92,7 @@ class URLLoaderFactory : public mojom::URLLoaderFactory,
   GetIsolatedTransactionFactory(
       const base::UnguessableToken& throttling_profile_id,
       const GURL& url) const override;
+  mojom::MoleAuthObserver* GetMoleAuthObserver() const override;
 
   // Allows starting a URLLoader with a synchronous URLLoaderClient as an
   // optimization.
@@ -133,6 +135,7 @@ class URLLoaderFactory : public mojom::URLLoaderFactory,
 
   mojo::Remote<mojom::CookieAccessObserver> cookie_observer_;
   mojo::Remote<mojom::TrustTokenAccessObserver> trust_token_observer_;
+  mojo::Remote<mojom::MoleAuthObserver> mole_observer_;
   mojo::Remote<mojom::DevToolsObserver> devtools_observer_;
   scoped_refptr<RefCountedDeviceBoundSessionAccessObserverRemote>
       device_bound_session_observer_;

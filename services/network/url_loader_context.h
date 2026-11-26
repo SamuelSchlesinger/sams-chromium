@@ -32,6 +32,7 @@ class OriginAccessList;
 
 namespace mojom {
 class CrossOriginEmbedderPolicyReporter;
+class MoleAuthObserver;
 class NetworkContextClient;
 class TrustedURLLoaderHeaderClient;
 class URLLoaderFactoryParams;
@@ -70,6 +71,8 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) URLLoaderContext {
   GetIsolatedTransactionFactory(
       const base::UnguessableToken& throttling_profile_id,
       const GURL& url) const = 0;
+
+  virtual mojom::MoleAuthObserver* GetMoleAuthObserver() const = 0;
 
  protected:
   // `protected` destructor = can only destruct via concrete implementations

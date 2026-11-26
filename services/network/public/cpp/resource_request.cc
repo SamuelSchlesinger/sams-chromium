@@ -380,6 +380,7 @@ bool ResourceRequest::EqualsForTesting(const ResourceRequest& request) const {
          devtools_accepted_stream_types ==
              request.devtools_accepted_stream_types &&
          trust_token_params == request.trust_token_params &&
+         mole_params == request.mole_params &&
          OptionalWebBundleTokenParamsEqualsForTesting(  // IN-TEST
              web_bundle_token_params, request.web_bundle_token_params) &&
          OptionalNetLogInfoEqualsForTesting(net_log_create_info,

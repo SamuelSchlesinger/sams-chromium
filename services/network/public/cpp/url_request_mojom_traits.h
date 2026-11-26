@@ -36,6 +36,7 @@
 #include "services/network/public/mojom/devtools_observer.mojom-forward.h"
 #include "services/network/public/mojom/fetch_retry_options.mojom.h"
 #include "services/network/public/mojom/ip_address_space.mojom-forward.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom-forward.h"
 #include "services/network/public/mojom/trust_token_access_observer.mojom-forward.h"
 #include "services/network/public/mojom/trust_tokens.mojom-forward.h"
 #include "services/network/public/mojom/url_loader.mojom-forward.h"
@@ -426,6 +427,10 @@ struct COMPONENT_EXPORT(NETWORK_CPP_BASE)
   static const network::mojom::TrustTokenParamsPtr& trust_token_params(
       const network::ResourceRequest& request) {
     return request.trust_token_params.as_ptr();
+  }
+  static const network::mojom::MoleRequestParamsPtr& mole_params(
+      const network::ResourceRequest& request) {
+    return request.mole_params.as_ptr();
   }
   static const std::optional<network::ResourceRequest::WebBundleTokenParams>&
   web_bundle_token_params(const network::ResourceRequest& request) {

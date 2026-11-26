@@ -48,6 +48,19 @@ bool ContainsForbiddenSecurityHeader(
     net::HttpRequestHeaders& headers,
     std::string* out_forbidden_header_name = nullptr);
 
+// Returns true if `value` uses the `Mole` HTTP authentication scheme
+// (case-insensitively, ignoring leading HTTP LWS).
+COMPONENT_EXPORT(NETWORK_CPP)
+bool IsMoleAuthorizationHeaderValue(std::string_view value);
+
+// Returns true if `headers` contains any browser-managed Moderated Endorsements
+// (MOLE) request header (`Sec-Mole-*`, `Sec-Want-Endorsement`, or
+// `Authorization: Mole ...`) that an untrusted renderer must never spoof.
+COMPONENT_EXPORT(NETWORK_CPP)
+bool ContainsForbiddenMoleHeader(
+    const net::HttpRequestHeaders& headers,
+    std::string* out_forbidden_header_name = nullptr);
+
 // Validates that `removed_headers` does not contain security-sensitive headers
 // (e.g. Origin, or Sec- headers other than Client Hints) from an untrusted
 // client. Returns true if all headers are valid to remove, or false if an
