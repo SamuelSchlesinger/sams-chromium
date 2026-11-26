@@ -1,0 +1,37 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! ACT-specific scalar decoding and `CtOption` handling.
+
+use mole_p256::hash::BackendHashExt;
+use subtle::CtOption;
+use zeroize::Zeroize;
+
+use crate::backend::Backend;
+
+pub(crate) const NSEED: usize = crate::SEED_LENGTH;
+
+/// Checks that a `CtOption` holds a value, mapping absence to `error`.
+pub(crate) fn require<T, E>(value: CtOption<T>, error: E) -> Result<T, E> {
+    value.into_option().ok_or(error)
+}
+
+/// Fiat-Shamir's little-endian `DecodeUint` is specific to ACT.
+pub(crate) fn reduce_le_48<B: Backend>(bytes: &[u8; 48]) -> B::Scalar {
+    let mut reversed = *bytes;
+    reversed.reverse();
+    let scalar = B::reduce_be_48(&reversed);
+    reversed.zeroize();
+    scalar
+}

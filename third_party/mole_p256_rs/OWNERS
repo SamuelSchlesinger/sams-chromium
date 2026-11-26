@@ -1,0 +1,5 @@
+samschlesinger@chromium.org
+file://net/OWNERS
+
+# Support autorollers.
+per-file README.chromium=*
