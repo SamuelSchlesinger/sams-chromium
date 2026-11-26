@@ -1470,7 +1470,7 @@ bool NavigationSimulatorImpl::SimulateRendererInitiatedStart() {
           blink::mojom::ForceHistoryPush::kNo, searchable_form_url_,
           searchable_form_encoding_, GURL() /* client_side_redirect_url */,
           std::nullopt /* detools_initiator_info */,
-          nullptr /* trust_token_params */,
+          nullptr /* trust_token_params */, nullptr /* mole_params */,
           base::TimeTicks() /* renderer_before_unload_start */,
           base::TimeTicks() /* renderer_before_unload_end */,
           base::TimeTicks() /* before_unload_dialog_opened */,

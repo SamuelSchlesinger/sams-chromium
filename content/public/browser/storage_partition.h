@@ -227,6 +227,12 @@ class CONTENT_EXPORT StoragePartition {
     // Declarative Performance Observer data.
     REMOVE_DATA_MASK_DECLARATIVE_PERFORMANCE_OBSERVER = 1 << 22,
 
+    // Moderated Endorsements (MOLE) persistent endorsements & credentials.
+    REMOVE_DATA_MASK_MODERATED_ENDORSEMENTS = 1 << 23,
+    // Internal rate-limiting state (`site_moderator_associations` and
+    // `site_bootstrap_budget`), cleared only on user-initiated deletions.
+    REMOVE_DATA_MASK_MODERATED_ENDORSEMENTS_USER_CLEAR = 1 << 24,
+
     REMOVE_DATA_MASK_ALL = 0xFFFFFFFF,
   };
 

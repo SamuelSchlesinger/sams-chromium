@@ -74,6 +74,7 @@ namespace network {
 namespace mojom {
 class SharedDictionaryAccessObserver;
 class DeviceBoundSessionAccessObserver;
+class MoleAuthObserver;
 }  // namespace mojom
 }  // namespace network
 
@@ -108,6 +109,7 @@ class FileSystemAccessManagerImpl;
 class FontAccessManager;
 class GeneratedCodeCacheContext;
 class HostZoomLevelContext;
+class ModeratedEndorsementsManager;
 class PaymentAppContextImpl;
 class PushMessagingContext;
 class QuotaContext;
@@ -274,6 +276,13 @@ class CONTENT_EXPORT StoragePartitionImpl
       std::unique_ptr<FontAccessManager> font_access_manager);
   const std::string& GetPartitionDomain() const;
   FontAccessManager* GetFontAccessManager();
+  ModeratedEndorsementsManager* GetModeratedEndorsementsManager();
+  mojo::PendingRemote<network::mojom::MoleAuthObserver>
+  CreateMoleAuthObserverForFrame(GlobalRenderFrameHostId frame_id);
+  mojo::PendingRemote<network::mojom::MoleAuthObserver>
+  CreateMoleAuthObserverForServiceWorker(const url::Origin& worker_origin);
+  mojo::PendingRemote<network::mojom::MoleAuthObserver>
+  CreateMoleAuthObserverForBrowserProcess();
 
   // blink::mojom::DomStorage interface.
   void OpenLocalStorage(
@@ -938,6 +947,8 @@ class CONTENT_EXPORT StoragePartitionImpl
   mojo::ReceiverSet<network::mojom::URLLoaderNetworkServiceObserver,
                     URLLoaderNetworkContext>
       url_loader_network_observers_;
+
+  std::unique_ptr<ModeratedEndorsementsManager> moderated_endorsements_manager_;
 
   int next_pending_trust_token_issuance_callback_key_ = 0;
 

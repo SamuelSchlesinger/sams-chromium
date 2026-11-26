@@ -4,6 +4,9 @@
 
 #include "content/public/browser/content_browser_client.h"
 
+#include <stdint.h>
+
+#include <array>
 #include <memory>
 #include <optional>
 #include <string_view>
@@ -65,6 +68,7 @@
 #include "content/public/common/content_features.h"
 #include "content/public/common/url_constants.h"
 #include "content/public/common/url_utils.h"
+#include "crypto/random.h"
 #include "media/audio/audio_manager.h"
 #include "media/capture/content/screen_enumerator.h"
 #include "media/mojo/mojom/media_service.mojom.h"
@@ -2137,5 +2141,18 @@ bool ContentBrowserClient::IsExemptFromWindowSizeCheck(const GURL& url) {
 bool ContentBrowserClient::IsNoStatePrefetch(WebContents* web_contents) {
   return false;
 }
+
+void ContentBrowserClient::GetModeratedEndorsementsEncryptionKey(
+    BrowserContext* browser_context,
+    const base::FilePath& partition_path,
+    base::OnceCallback<void(std::array<uint8_t, 32>)> callback) {
+  std::array<uint8_t, 32> key;
+  crypto::RandBytes(key);
+  std::move(callback).Run(key);
+}
+
+void ContentBrowserClient::DeleteModeratedEndorsementsEncryptionKey(
+    BrowserContext* browser_context,
+    const base::FilePath& partition_path) {}
 
 }  // namespace content

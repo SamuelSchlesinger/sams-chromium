@@ -4,7 +4,10 @@
 
 #include "chrome/browser/chrome_content_browser_client.h"
 
+#include <stdint.h>
+
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -23,6 +26,7 @@
 #include "base/command_line.h"
 #include "base/containers/fixed_flat_map.h"
 #include "base/containers/fixed_flat_set.h"
+#include "base/containers/span.h"
 #include "base/containers/to_vector.h"
 #include "base/dcheck_is_on.h"
 #include "base/feature_list.h"
@@ -48,15 +52,19 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/supports_user_data.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/task/thread_pool.h"
 #include "base/types/expected.h"
 #include "base/types/expected_macros.h"
 #include "base/types/optional_ref.h"
 #include "base/values.h"
 #include "build/android_buildflags.h"
 #include "build/branding_buildflags.h"
+#include "base/files/file_util.h"
+#include "base/files/important_file_writer.h"
 #include "build/build_config.h"
 #include "build/config/chromebox_for_meetings/buildflags.h"  // PLATFORM_CFM
 #include "chrome/browser/accessibility/caption_settings_dialog.h"
@@ -308,6 +316,9 @@
 #include "components/net_log/chrome_net_log.h"
 #include "components/network_session_configurator/common/network_switches.h"
 #include "components/no_state_prefetch/browser/no_state_prefetch_manager.h"
+#include "components/os_crypt/async/browser/os_crypt_async.h"
+#include "components/os_crypt/async/common/encryptor.h"
+#include "crypto/random.h"
 #include "components/no_state_prefetch/common/no_state_prefetch_final_status.h"
 #include "components/no_state_prefetch/common/no_state_prefetch_url_loader_throttle.h"
 #include "components/on_device_translation/buildflags/buildflags.h"
@@ -461,6 +472,7 @@
 #include "third_party/blink/public/mojom/navigation/navigation_params.mojom.h"
 #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom.h"
 #include "third_party/blink/public/public_buildflags.h"
+#include "third_party/boringssl/src/include/openssl/mem.h"
 #include "ui/base/clipboard/clipboard_format_type.h"
 #include "ui/base/clipboard/clipboard_metadata.h"
 #include "ui/base/mojom/window_open_disposition.mojom.h"
@@ -10199,4 +10211,85 @@ bool ChromeContentBrowserClient::IsNoStatePrefetch(
     content::WebContents* web_contents) {
   return prerender::ChromeNoStatePrefetchContentsDelegate::FromWebContents(
              web_contents) != nullptr;
+}
+
+void ChromeContentBrowserClient::GetModeratedEndorsementsEncryptionKey(
+    content::BrowserContext* browser_context,
+    const base::FilePath& partition_path,
+    base::OnceCallback<void(std::array<uint8_t, 32>)> callback) {
+  if (!browser_context || browser_context->IsOffTheRecord() ||
+      partition_path.empty() || !g_browser_process ||
+      !g_browser_process->os_crypt_async()) {
+    ContentBrowserClient::GetModeratedEndorsementsEncryptionKey(
+        browser_context, partition_path, std::move(callback));
+    return;
+  }
+
+  g_browser_process->os_crypt_async()->GetInstance(base::BindOnce(
+      [](base::FilePath dir,
+         base::OnceCallback<void(std::array<uint8_t, 32>)> cb,
+         scoped_refptr<os_crypt_async::Encryptor> encryptor) {
+        base::ThreadPool::PostTaskAndReplyWithResult(
+            FROM_HERE,
+            {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
+             base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+            base::BindOnce(
+                [](base::FilePath storage_dir,
+                   scoped_refptr<os_crypt_async::Encryptor> enc) {
+                  const base::FilePath key_path = storage_dir.Append(
+                      FILE_PATH_LITERAL("ModeratedEndorsementsKey"));
+                  std::string wrapped;
+                  if (enc && base::ReadFileToString(key_path, &wrapped)) {
+                    if (std::optional<std::string> unwrapped =
+                            enc->DecryptData(base::as_byte_span(wrapped));
+                        unwrapped) {
+                      if (unwrapped->size() == 32u) {
+                        std::array<uint8_t, 32> existing;
+                        base::span(existing).copy_from(
+                            base::as_byte_span(*unwrapped));
+                        OPENSSL_cleanse(unwrapped->data(), unwrapped->size());
+                        return existing;
+                      }
+                      OPENSSL_cleanse(unwrapped->data(), unwrapped->size());
+                    }
+                  }
+
+                  std::array<uint8_t, 32> fresh;
+                  crypto::RandBytes(fresh);
+                  if (enc) {
+                    std::string plaintext(base::as_string_view(fresh));
+                    std::optional<std::vector<uint8_t>> encrypted =
+                        enc->EncryptString(plaintext);
+                    OPENSSL_cleanse(plaintext.data(), plaintext.size());
+                    if (encrypted) {
+                      base::CreateDirectory(storage_dir);
+                      base::ImportantFileWriter::WriteFileAtomically(
+                          key_path, base::as_string_view(*encrypted));
+                    }
+                  }
+                  return fresh;
+                },
+                std::move(dir), std::move(encryptor)),
+            std::move(cb));
+      },
+      partition_path, std::move(callback)));
+}
+
+void ChromeContentBrowserClient::DeleteModeratedEndorsementsEncryptionKey(
+    content::BrowserContext* browser_context,
+    const base::FilePath& partition_path) {
+  if (!browser_context || browser_context->IsOffTheRecord() ||
+      partition_path.empty()) {
+    return;
+  }
+  base::ThreadPool::PostTask(
+      FROM_HERE,
+      {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
+       base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+      base::BindOnce(
+          [](base::FilePath storage_dir) {
+            base::DeleteFile(storage_dir.Append(
+                FILE_PATH_LITERAL("ModeratedEndorsementsKey")));
+          },
+          partition_path));
 }

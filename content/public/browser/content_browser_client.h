@@ -6,7 +6,9 @@
 #define CONTENT_PUBLIC_BROWSER_CONTENT_BROWSER_CLIENT_H_
 
 #include <stddef.h>
+#include <stdint.h>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -3495,6 +3497,20 @@ class CONTENT_EXPORT ContentBrowserClient {
   // Returns true if `web_contents` is used for NoStatePrefetch and will not be
   // rendered.
   virtual bool IsNoStatePrefetch(WebContents* web_contents);
+
+  // Asynchronously supplies the 256-bit AES-GCM master key for encrypting
+  // persistent Moderated Endorsements SQLite rows inside `partition_path`.
+  // Default implementation generates an ephemeral random key in RAM.
+  virtual void GetModeratedEndorsementsEncryptionKey(
+      BrowserContext* browser_context,
+      const base::FilePath& partition_path,
+      base::OnceCallback<void(std::array<uint8_t, 32>)> callback);
+
+  // Deletes any persisted wrapped master key inside `partition_path` during a
+  // full user-initiated browsing-data wipe.
+  virtual void DeleteModeratedEndorsementsEncryptionKey(
+      BrowserContext* browser_context,
+      const base::FilePath& partition_path);
 };
 
 }  // namespace content

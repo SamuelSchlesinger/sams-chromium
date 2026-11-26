@@ -96,6 +96,9 @@ blink::mojom::FetchAPIRequestPtr TypeConverter<
   if (input.trust_token_params) {
     output->trust_token_params = input.trust_token_params->Clone();
   }
+  if (input.mole_params) {
+    output->mole_params = input.mole_params->Clone();
+  }
   output->target_address_space = static_cast<network::mojom::IPAddressSpace>(
       input.required_ip_address_space);
   return output;

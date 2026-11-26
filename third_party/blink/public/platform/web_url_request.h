@@ -52,6 +52,7 @@ enum class RequestMode : int32_t;
 enum class RequestDestination : int32_t;
 }  // namespace mojom
 
+class OptionalMoleParams;
 class OptionalTrustTokenParams;
 }  // namespace network
 
@@ -272,6 +273,9 @@ class BLINK_PLATFORM_EXPORT WebURLRequest {
   // Specifies a Trust Tokens protocol operation to execute alongside the
   // request's load (https://github.com/wicg/trust-token-api).
   network::OptionalTrustTokenParams TrustTokenParams() const;
+
+  // Declarative Moderated Endorsements (MOLE) parameters attached to the load.
+  network::OptionalMoleParams MoleParams() const;
 
   std::optional<WebURL> WebBundleUrl() const;
   std::optional<base::UnguessableToken> WebBundleToken() const;

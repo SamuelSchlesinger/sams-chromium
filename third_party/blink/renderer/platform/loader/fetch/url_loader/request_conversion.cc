@@ -17,6 +17,7 @@
 #include "net/http/http_util.h"
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/is_potentially_trustworthy.h"
+#include "services/network/public/cpp/optional_mole_params.h"
 #include "services/network/public/cpp/optional_trust_token_params.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/resource_request_body.h"
@@ -24,6 +25,8 @@
 #include "services/network/public/mojom/data_pipe_getter.mojom-blink.h"
 #include "services/network/public/mojom/data_pipe_getter.mojom.h"
 #include "services/network/public/mojom/fetch_retry_options.mojom-shared.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom-blink.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom.h"
 #include "services/network/public/mojom/trust_tokens.mojom-blink.h"
 #include "services/network/public/mojom/trust_tokens.mojom.h"
 #include "third_party/blink/public/common/loader/network_utils.h"
@@ -38,6 +41,7 @@
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/renderer/platform/blob/blob_data.h"
 #include "third_party/blink/renderer/platform/exported/wrapped_resource_request.h"
+#include "third_party/blink/renderer/platform/loader/fetch/mole_params_conversion.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
 #include "third_party/blink/renderer/platform/loader/fetch/trust_token_params_conversion.h"
 #include "third_party/blink/renderer/platform/network/encoded_form_data.h"
@@ -372,6 +376,7 @@ void PopulateResourceRequest(const ResourceRequestHead& src,
   dest->enable_upload_progress = src.ReportUploadProgress();
   dest->throttling_profile_id = src.GetDevToolsThrottlingToken();
   dest->trust_token_params = ConvertTrustTokenParams(src.TrustTokenParams());
+  dest->mole_params = ConvertMoleParams(src.MoleParams());
   dest->required_ip_address_space = src.GetTargetAddressSpace();
   if (src.HasFetchRetryOptions()) {
     dest->fetch_retry_options = src.FetchRetryOptions();

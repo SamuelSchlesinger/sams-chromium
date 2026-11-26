@@ -760,6 +760,9 @@ bool ServiceWorkerFetchDispatcher::MaybeStartNavigationPreload(
 
   resource_request.skip_service_worker = true;
   resource_request.do_not_prompt_for_login = true;
+  // Never attach single-use MOLE credentials on speculative navigation preload;
+  // only the Service Worker's actual pass-through `fetch(event.request)` spends.
+  resource_request.mole_params = std::nullopt;
 
   DCHECK(net::HttpUtil::IsValidHeaderValue(
       version_->navigation_preload_state().header));

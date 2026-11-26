@@ -4712,6 +4712,14 @@
       name: "MobileLayoutTheme",
     },
     {
+      // Moderated Endorsements (MOLE): `fetch(url, { moderated })`,
+      // `<form moderated>`, and `navigator.endorsement.{endorse, settle}()`.
+      name: "ModeratedEndorsements",
+      status: "experimental",
+      origin_trial_feature_name: "ModeratedEndorsements",
+      public: true,
+    },
+    {
       name: "ModifyParagraphCrossEditingoundary",
       status: "stable",
     },

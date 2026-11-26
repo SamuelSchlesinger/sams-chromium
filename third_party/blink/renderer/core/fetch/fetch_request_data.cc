@@ -203,6 +203,12 @@ FetchRequestData* FetchRequestData::Create(
     request->SetTrustTokenParams(trust_token_params);
   }
 
+  if (fetch_api_request->mole_params) {
+    std::optional<network::mojom::blink::MoleRequestParams> mole_params =
+        std::move(*(fetch_api_request->mole_params->Clone().get()));
+    request->SetMoleParams(std::move(mole_params));
+  }
+
   if (fetch_api_request->service_worker_race_network_request_token) {
     request->SetServiceWorkerRaceNetworkRequestToken(
         fetch_api_request->service_worker_race_network_request_token.value());
@@ -237,6 +243,7 @@ FetchRequestData* FetchRequestData::CloneExceptBody() {
   request->is_reload_navigation_ = is_reload_navigation_;
   request->window_id_ = window_id_;
   request->trust_token_params_ = trust_token_params_;
+  request->mole_params_ = mole_params_;
   request->service_worker_race_network_request_token_ =
       service_worker_race_network_request_token_;
   request->retry_options_ = retry_options_;

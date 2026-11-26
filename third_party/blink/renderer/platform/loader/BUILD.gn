@@ -73,6 +73,8 @@ blink_platform_sources("loader") {
     "fetch/media_timing.h",
     "fetch/memory_cache.cc",
     "fetch/memory_cache.h",
+    "fetch/mole_params_conversion.cc",
+    "fetch/mole_params_conversion.h",
     "fetch/null_resource_fetcher_properties.cc",
     "fetch/null_resource_fetcher_properties.h",
     "fetch/persistent_code_cache_host.cc",

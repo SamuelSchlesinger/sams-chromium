@@ -31,6 +31,8 @@
 #include "third_party/blink/renderer/core/loader/form_submission.h"
 
 #include "services/network/public/cpp/is_potentially_trustworthy.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom-blink.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
 #include "third_party/blink/public/common/security_context/insecure_request_policy.h"
 #include "third_party/blink/public/mojom/frame/frame.mojom-blink.h"
 #include "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom-blink.h"
@@ -58,6 +60,7 @@
 #include "third_party/blink/renderer/core/script_tools/script_tool_context.h"
 #include "third_party/blink/renderer/platform/bindings/source_location.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
 #include "third_party/blink/renderer/platform/network/encoded_form_data.h"
@@ -66,6 +69,7 @@
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/scheduler/public/task_attribution_info.h"
 #include "third_party/blink/renderer/platform/scheduler/public/task_attribution_tracker.h"
+#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
@@ -364,6 +368,25 @@ FormSubmission* FormSubmission::Create(HTMLFormElement* form,
     }
   }
   resource_request->SetFormSubmission(true);
+  if (RuntimeEnabledFeatures::ModeratedEndorsementsEnabled(
+          document.domWindow()) &&
+      form->FastHasAttribute(html_names::kModeratedAttr) &&
+      (!form_local_frame || !form_local_frame->IsInFencedFrameTree()) &&
+      document.domWindow()->IsSecureContext() &&
+      document.domWindow()->IsFeatureEnabled(
+          network::mojom::blink::PermissionsPolicyFeature::
+              kModeratedEndorsements) &&
+      action_url.ProtocolIsInHttpFamily()) {
+    scoped_refptr<const SecurityOrigin> action_origin =
+        SecurityOrigin::Create(action_url);
+    if (action_origin && !action_origin->IsOpaque() &&
+        action_origin->IsPotentiallyTrustworthy()) {
+      network::mojom::blink::MoleRequestParams mole_params;
+      mole_params.behavior = network::mojom::blink::MoleModerationBehavior::kAuto;
+      mole_params.allow_deferred_update = true;
+      resource_request->SetMoleParams(std::move(mole_params));
+    }
+  }
 
   mojom::blink::TriggeringEventInfo triggering_event_info;
   if (event) {

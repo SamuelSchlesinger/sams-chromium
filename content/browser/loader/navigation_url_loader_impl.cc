@@ -107,6 +107,7 @@
 #include "services/metrics/public/cpp/ukm_source_id.h"
 #include "services/network/public/cpp/constants.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/public/cpp/is_potentially_trustworthy.h"
 #include "services/network/public/cpp/parsed_headers.h"
 #include "services/network/public/cpp/request_destination.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -118,6 +119,7 @@
 #include "services/network/public/cpp/wrapper_shared_url_loader_factory.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 #include "services/network/public/mojom/network_service.mojom.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/loader/mime_sniffing_throttle.h"
 #include "third_party/blink/public/common/loader/record_load_histograms.h"
@@ -331,6 +333,20 @@ std::unique_ptr<network::ResourceRequest> CreateResourceRequest(
   if (request_info.begin_params->trust_token_params) {
     new_request->trust_token_params =
         *request_info.begin_params->trust_token_params;
+  }
+  if (request_info.begin_params->mole_params) {
+    RenderFrameHostImpl* rfh = frame_tree_node->current_frame_host();
+    if (frame_tree_node->IsOutermostMainFrame() &&
+        !frame_tree_node->IsInFencedFrameTree() && rfh &&
+        rfh->GetLifecycleState() ==
+            RenderFrameHost::LifecycleState::kActive &&
+        rfh->IsFeatureEnabled(
+            network::mojom::PermissionsPolicyFeature::
+                kModeratedEndorsements) &&
+        new_request->url.SchemeIsHTTPOrHTTPS() &&
+        network::IsUrlPotentiallyTrustworthy(new_request->url)) {
+      new_request->mole_params = *request_info.begin_params->mole_params;
+    }
   }
 
   const bool is_storage_access_grant_eligible =
@@ -2587,6 +2603,7 @@ NavigationURLLoaderImpl::CreateURLLoaderFactoryWithHeaderClient(
   params->process_id = network::OriginatingProcessId::browser();
   params->is_trusted = true;
   params->is_orb_enabled = false;
+  params->mole_observer = partition->CreateMoleAuthObserverForBrowserProcess();
   params->network_restrictions_id = network_restrictions_id;
   params->disable_web_security =
       base::CommandLine::ForCurrentProcess()->HasSwitch(

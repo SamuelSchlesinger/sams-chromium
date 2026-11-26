@@ -6,7 +6,9 @@
 #define CHROME_BROWSER_CHROME_CONTENT_BROWSER_CLIENT_H_
 
 #include <stddef.h>
+#include <stdint.h>
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <set>
@@ -1286,6 +1288,15 @@ class ChromeContentBrowserClient : public content::ContentBrowserClient {
   bool IsExemptFromWindowSizeCheck(const GURL& url) override;
 
   bool IsNoStatePrefetch(content::WebContents* web_contents) override;
+
+  void GetModeratedEndorsementsEncryptionKey(
+      content::BrowserContext* browser_context,
+      const base::FilePath& partition_path,
+      base::OnceCallback<void(std::array<uint8_t, 32>)> callback) override;
+
+  void DeleteModeratedEndorsementsEncryptionKey(
+      content::BrowserContext* browser_context,
+      const base::FilePath& partition_path) override;
 
  protected:
   static bool HandleWebUI(GURL* url, content::BrowserContext* browser_context);

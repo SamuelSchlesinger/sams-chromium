@@ -1,0 +1,32 @@
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+module blink.mojom;
+
+import "url/mojom/origin.mojom";
+
+// Coarse outcome returned to `navigator.endorsement.{endorse, settle}()`.
+// Deliberately avoids exposing cross-site endorsement or credential inventory
+// so web pages cannot probe whether a user holds endorsements from any Anchor.
+enum ModeratedEndorsementStatus {
+  kOk = 0,
+  kInvalidArgument = 1,
+  kNotAllowed = 2,
+  kNetworkError = 3,
+};
+
+// Document-scoped Browser Process service backing `navigator.endorsement`.
+// All cryptographic key material, EC-IHAT endorsements, and EC-ACT credentials
+// remain strictly inside the Browser Process (`ModeratedEndorsementsStore`).
+interface ModeratedEndorsementService {
+  // Runs an EC-IHAT endorsement grant against the current top-level Anchor
+  // origin using optional caller-supplied `authorization` (e.g. OAuth/Passkey
+  // proof) when permitted by user activation, commitment registry, and the
+  // per-SchemefulSite 24h bootstrap budget.
+  Endorse(string? authorization) => (ModeratedEndorsementStatus status);
+
+  // Settles (`POST /mole/v1/settle`) any active deferred-update session(s) held
+  // for the current top-level site, optionally filtered to `moderator`.
+  Settle(url.mojom.Origin? moderator) => (ModeratedEndorsementStatus status);
+};

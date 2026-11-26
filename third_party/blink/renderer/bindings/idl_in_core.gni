@@ -281,6 +281,7 @@ static_idl_files_in_core = [
   "//third_party/blink/renderer/core/fetch/deferred_request_init.idl",
   "//third_party/blink/renderer/core/fetch/fetch_later.idl",
   "//third_party/blink/renderer/core/fetch/headers.idl",
+  "//third_party/blink/renderer/core/fetch/moderated_request_init.idl",
   "//third_party/blink/renderer/core/fetch/private_token.idl",
   "//third_party/blink/renderer/core/fetch/request.idl",
   "//third_party/blink/renderer/core/fetch/request_init.idl",

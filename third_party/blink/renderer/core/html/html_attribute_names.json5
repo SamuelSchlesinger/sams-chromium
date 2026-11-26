@@ -172,6 +172,7 @@
     "method",
     "min",
     "minlength",
+    "moderated",
     "multiple",
     "muted",
     "name",

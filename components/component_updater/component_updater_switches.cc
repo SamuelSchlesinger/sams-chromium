@@ -15,6 +15,10 @@ constexpr char kComponentUpdater[] = "component-updater";
 constexpr char kComponentUpdaterTrustTokensComponentPath[] =
     "component-updater-trust-tokens-component-path";
 
+// Optional testing override of the MoLE key-commitment component's path.
+const char kComponentUpdaterMoleKeyCommitmentsPath[] =
+    "component-updater-mole-key-commitments-path";
+
 // Switch to control which serving campaigns file versions to select in test
 // cohort. Example: `--campaigns-test-tag=dev1` will select test cohort which
 // tag matches dev1.
