@@ -2,194 +2,202 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cxx FFI bridge over the MoLE cryptographic stack
-//! (`//third_party/mole`), exposing the Client side of the MoLE
-//! architecture to C++ as a sans-I/O state machine: every method either
-//! consumes bytes received over HTTP or produces the bytes/header values the
-//! next HTTP exchange must carry. All networking stays in C++.
+//! `cxx` FFI bridge over the spec-compliant MOLE cryptographic and transport
+//! stack (`//third_party/mole`), exposing the Client side of
+//! `draft-jms-mole-protocols-01` and `draft-jms-mole-http-transport-01` to C++
+//! as a sans-I/O state machine.
 //!
-//! The Client holds a per-policy *pool* of ACT Credentials. A Credential is
-//! linear — its spend must be finalized by the Moderator's refund before a
-//! successor exists — so concurrent presentations require independent
-//! Credentials. One endorsement redemption fills the pool with the policy's
-//! `issuance-batch` of them; presentations draw from the pool front and
-//! finalized successors rejoin at the back, so the chains drain evenly.
-//!
-//! `TestMoleAnchor` / `TestMoleModerator` are in-process ports of the
-//! mole-anchor / mole-moderator server handlers, so unit tests can run the
-//! whole protocol — grant, redeem & issue, presentation and update, plus the
-//! double-spend and replay rejections — without sockets. They speak in the
-//! same wire messages as the real servers.
+//! Key properties enforced here:
+//! - Batched EC-IHAT grants (`0x0002`, `draft-ladd-mole-ec-ihat-00`) keyed by
+//!   `grant_id`, eliminating cross-tab grant clobbering.
+//! - Out-of-band `POST <issuance-uri>` Redeem & Issue (`redeem-0002` /
+//!   `redeem-0001` with 32-byte `RedemptionChallenge` + `credential-request-0001`
+//!   -> `200 OK` `Mole-Credential: response-0001`), keyed by `redeem_id`.
+//! - Fail-closed `MoleCommitmentRegistry` enforcement pinning Anchor keys/epochs
+//!   and Moderator `credential_key`, `balance_width`, `initial_balance`,
+//!   `spend_amount`, `max_top_up`, `issuance_uri`, and ordered `anchor_set`.
+//! - Durable write-ahead `PendingSpend` (`InFlight` and `Held`) state supporting
+//!   `Mole-Credential: held-for-update-0001`, `Authorization: Mole recovery-0001`,
+//!   `Authorization: Mole signoff-0001`, and empty `update-0001=""` (`NoUpdate`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-// ACT runs on act_boring (the ACT(P-256, SHAKE128) ciphersuite over BoringSSL),
-// replacing the vendored ristretto255 `anonymous_credit_tokens` crate.
-use act_boring::proofs::request_context_scalar;
-use act_boring::spend::{prove_spend, scalar_to_u128, PreRefund, Refund, SpendProof};
-use act_boring::{
-    CreditToken, IssuanceRequest as ActIssuanceRequestMsg,
-    IssuanceResponse as ActIssuanceResponseMsg, Params, PreIssuance, PrivateKey as ActPrivateKey,
-    PublicKey as ActPublicKey, Scalar as ActScalar,
-};
-// IHAT runs on ihat_boring (BoringSSL P-256), a byte-compatible drop-in for the
-// former `ihat` crate. Anchor public keys are group elements (`IhatKey`).
-use ihat_boring::anchor::{AnchorNeedsProofRequest, AnchorSecretKey};
-use ihat_boring::client::{ClientNeedsProof, ClientNeedsSignature, IssuedEndorsement};
-use ihat_boring::wire::decode_anchor_key;
-use ihat_boring::{Point as IhatKey, Proof, ProofRequest, Signature, SignatureRequest};
-use mole_core::act::{key_id, truncated_key_id, BALANCE_DIGITS};
+use mole_core::act::{DEFAULT_BALANCE_WIDTH, compute_ec_act_key_id, derive_ctx_cred};
 use mole_core::config::{
-    AnchorDirectory, AnchorEndorsementConfig, ModeratorDirectory, ModeratorPolicy,
+    AnchorConfiguration, EcActKeyConfig, EcIhatEndorsementConfig, ModeratorConfiguration,
+    NoEndorsementConfig, ValidatedEcActKey, ValidatedEcIhatSet, validate_https_endpoint_uri,
 };
 use mole_core::http::{
-    b64_encode, parse_challenges, MoleAuthorization, MoleChallenge, MoleCredential,
+    MoleAuthorization, MoleChallenge, MoleCredential, b64_encode,
+    format_endorsement_request_media_type, format_endorsement_response_media_type,
+    format_www_authenticate, parse_challenges, parse_endorsement_request_media_type,
+    parse_endorsement_response_media_type,
 };
 use mole_core::messages::{
-    ActChallenge, ActIssuanceRequest, ActIssuanceResponse, ActPresentationAndUpdate, ActUpdate,
-    CredentialChallenge, CredentialPresentation, CredentialRequest, CredentialResponse,
-    CredentialUpdate, EndorsementRequest, EndorsementResponse, IhatChallenge, IhatGrantRequest,
-    IhatGrantResponse, IhatPresentation, ModeratorChallenge, OptionalCredentialUpdate,
+    EcActChallenge, EcActIssuanceRequest, EcActIssuanceResponse, EcActPresentationAndUpdate,
+    EcActUpdate, EcIhatGrantPost, GrantChallenges, GrantCommitments, GrantRequest, GrantResponses,
+    RecoveryHandle, RedemptionChallenge,
 };
-use mole_core::wire::Wire;
-use mole_core::{challenge_digest, credential_type, endorsement_type};
-use sigma_boring::fill_random;
+use mole_core::wire::Wire as _;
+use mole_core::{
+    CIPHERSUITE_P256_SHA256, EC_IHAT_CTX_RED, challenge_digest, credential_type, endorsement_type,
+    fill_random, sha256,
+};
+use mole_p256::zeroize::Zeroizing;
 
-/// ACT(P-256) parameters. The digit count `D` is applied per-operation
-/// (`issue`, `prove_spend`, `refund`) rather than carried in the type.
-type ActParams = Params;
+/// Default number of EC-IHAT Endorsements requested per Anchor grant batch.
+pub const DEFAULT_GRANT_BATCH_COUNT: u16 = 4;
 
 #[cxx::bridge(namespace = "moderated_endorsements")]
-mod ffi {
-    /// A status-only outcome. `error` is a diagnostic, meaningful when `ok`
-    /// is false; it must never be surfaced to web content verbatim.
-    struct StatusResult {
-        ok: bool,
-        error: String,
-    }
-
-    /// Outcome of starting an endorsement grant: where to POST and what.
-    struct GrantBegin {
-        ok: bool,
-        error: String,
-        /// Grant endpoint path, relative to the Anchor origin.
-        endorse_path: String,
-        /// `application/mole-endorsement-request` body for the first
-        /// exchange.
-        request_body: Vec<u8>,
-    }
-
-    /// Outcome of consuming a grant-exchange response. When `done` is false,
-    /// `request_body` is the body of the next exchange; when true, the
-    /// Endorsement is stored and no further exchange is needed.
-    struct GrantStep {
-        ok: bool,
-        error: String,
-        done: bool,
-        request_body: Vec<u8>,
-    }
-
-    /// What a Moderator's challenge asks for, and whether this Client must
-    /// run Redeem & Issue before it can present.
-    struct ChallengeEval {
-        ok: bool,
-        error: String,
-        /// The policy the challenge names.
-        policy_context: Vec<u8>,
-        /// True when the pool holds no Credential for this policy.
-        needs_redeem: bool,
-        /// True when redemption is impossible for want of an Endorsement
-        /// from an accepted Anchor: the user agent must `collect()` one.
-        /// Key-membership is the only check possible here (the epoch lives
-        /// in the Moderator directory, not the challenge bytes), so false
-        /// is necessary but not sufficient — a failed redeem_begin must
-        /// also be treated as "collect a fresh Endorsement and retry".
-        needs_endorsement: bool,
-    }
-
-    /// Outcome of building a Redeem & Issue request.
-    struct RedeemBegin {
-        ok: bool,
-        error: String,
-        /// Value for the `Authorization` request header.
-        authorization_header: String,
-    }
-
-    /// Outcome of finalizing Redeem & Issue.
-    struct RedeemFinish {
-        ok: bool,
-        error: String,
-        /// Credentials now pooled for the policy.
-        pool_size: usize,
-    }
-
-    /// Outcome of building a presentation. The drawn Credential is burned:
-    /// it never returns to the pool, only its update-derived successor does
-    /// (via `present_finish`).
-    struct PresentBegin {
-        ok: bool,
-        error: String,
-        /// Correlates the eventual `present_finish` / `present_abort`.
-        presentation_id: u64,
-        /// Value for the `Authorization` request header.
-        authorization_header: String,
-    }
-
-    /// A byte string, for vectors-of-byte-strings (cxx has no nested Vec).
+pub mod ffi {
+    /// Byte-vector wrapper (since `cxx` disallows nested `Vec<Vec<u8>>`).
+    #[derive(Clone, Debug)]
     struct Blob {
         bytes: Vec<u8>,
     }
 
-    /// The committed parameters the browser's key-commitment registry (a
-    /// component-updater component, delivered identically to every browser to
-    /// defeat split-view) authorizes for one Anchor origin. Grant enforcement
-    /// refuses any endorsement whose key or epoch is not committed here; this
-    /// denies the "unique key/epoch per user" cross-site tagging channel.
-    /// `found == false` means the origin is not enrolled, so the grant is
-    /// refused outright (fail-closed).
+    /// Committed parameters authorized for an Anchor origin by the browser's
+    /// key-commitment registry. `found == false` refuses grants (fail-closed).
+    #[derive(Clone, Debug)]
     struct AnchorCommitment {
         found: bool,
-        /// Committed Anchor IHAT public keys (33-byte SEC1-compressed P-256).
+        /// Optional exact `grant-uri` pin; when empty, any HTTPS path on the
+        /// Anchor's own origin is permitted.
+        grant_uri: String,
+        /// Committed 33-byte SEC1-compressed P-256 Anchor public keys.
         keys: Vec<Blob>,
-        /// Committed endorsement contexts (epochs). The Anchor's advertised
-        /// epoch must be one of these, so an epoch cannot carry a per-user id.
+        /// Committed `issuance-epoch` (`ctx_iss`) byte strings.
         epochs: Vec<Blob>,
     }
 
-    /// One committed Moderator policy: the exact values a redemption for this
-    /// policy must match. `accepted_anchor_keys` is the WHOLE committed set in
-    /// normative order; a redemption's accepted set must equal it exactly (no
-    /// server-chosen subset), which denies the accepted-set partitioning
-    /// channel (including singleton-set deanonymization).
+    /// Committed policy invariants for one `credential_context` on a Moderator.
+    #[derive(Clone, Debug)]
     struct CommittedPolicy {
-        policy_context: Vec<u8>,
-        act_public_key: Vec<u8>,
-        act_domain_separator: Vec<u8>,
+        credential_context: Vec<u8>,
+        credential_key: Vec<u8>,
+        balance_width: u8,
+        /// Exact initial balance `c` the Moderator MUST grant at issuance.
+        /// Pinning this closes the per-Client initial-balance tagging channel.
+        initial_balance: u64,
+        spend_amount: u64,
+        max_top_up: u64,
+        /// Ordered 33-byte SEC1 Anchor public keys in the canonical `anchor-set`.
         accepted_anchor_keys: Vec<Blob>,
+        /// Accepted `issuance-epoch` (`ctx_iss`) values.
         epochs: Vec<Blob>,
-        /// The spend/top-up amounts. The spec makes these policy-wide
-        /// constants: a Moderator that varies `charge` or `topup` per Client
-        /// partitions the anonymity set, so a presentation whose challenged
-        /// amounts differ from these is refused.
-        charge: u64,
-        topup: u64,
+        /// Whether `0x0001` (`NoEndorsement`) is permitted for this policy.
+        allow_no_endorsement: bool,
+        /// Optional exact `issuance-uri` pin; when empty, any HTTPS path on the
+        /// Moderator's own origin is permitted.
+        issuance_uri: String,
     }
 
-    /// The committed policies the registry authorizes for one Moderator origin.
-    /// `found == false` ⇒ not enrolled ⇒ redemption refused (fail-closed).
+    /// Committed policies authorized for a Moderator origin.
+    #[derive(Clone, Debug)]
     struct ModeratorCommitment {
         found: bool,
         policies: Vec<CommittedPolicy>,
     }
 
-    /// An HTTP exchange as the in-process test servers see it: a status, the
-    /// header values that matter to the protocol, and a body.
+    /// Outcome of starting an EC-IHAT batch grant (`POST <grant_uri>`).
+    #[derive(Clone, Debug)]
+    struct GrantBegin {
+        ok: bool,
+        error: String,
+        grant_id: u64,
+        grant_uri: String,
+        content_type: String,
+        request_body: Vec<u8>,
+    }
+
+    /// Outcome of processing one grant HTTP response.
+    #[derive(Clone, Debug)]
+    struct GrantStep {
+        ok: bool,
+        error: String,
+        done: bool,
+        granted_count: usize,
+        content_type: String,
+        request_body: Vec<u8>,
+    }
+
+    /// Evaluation of a Moderator `401` `WWW-Authenticate: Mole` challenge set.
+    #[derive(Clone, Debug)]
+    struct ChallengeEval {
+        ok: bool,
+        error: String,
+        credential_context: Vec<u8>,
+        needs_redeem: bool,
+        needs_endorsement: bool,
+    }
+
+    /// Outcome of building a `POST <issuance_uri>` Redeem & Issue request.
+    #[derive(Clone, Debug)]
+    struct RedeemBegin {
+        ok: bool,
+        error: String,
+        redeem_id: u64,
+        issuance_uri: String,
+        authorization_header: String,
+    }
+
+    /// Outcome of finalizing `Mole-Credential: response-0001` on Redeem & Issue.
+    #[derive(Clone, Debug)]
+    struct RedeemFinish {
+        ok: bool,
+        error: String,
+        pool_size: usize,
+        balance: u64,
+    }
+
+    /// Outcome of building an `Authorization: Mole presentation-0001` header
+    /// and recording write-ahead `Spent` recovery state.
+    #[derive(Clone, Debug)]
+    struct PresentBegin {
+        ok: bool,
+        error: String,
+        presentation_id: u64,
+        authorization_header: String,
+    }
+
+    /// Outcome of processing `Mole-Credential` on a presentation response.
+    #[derive(Clone, Debug)]
+    struct PresentOutcome {
+        ok: bool,
+        error: String,
+        /// Non-zero when the Moderator answered `held-for-update-0001="<secs>"`.
+        held_for_secs: u64,
+        /// True when the Moderator answered `update-0001=""` (`NoUpdate`).
+        consumed_no_update: bool,
+    }
+
+    /// A pending `recovery-0001` or `signoff-0001` `POST <issuance_uri>` exchange
+    /// that must run before starting a new presentation at `moderator_origin`.
+    #[derive(Clone, Debug)]
+    struct PendingSettlement {
+        has_pending: bool,
+        pending_id: u64,
+        is_signoff: bool,
+        issuance_uri: String,
+        authorization_header: String,
+    }
+
+    /// Outcome of completing a `recovery-0001` or `signoff-0001` exchange.
+    #[derive(Clone, Debug)]
+    struct SettleOutcome {
+        ok: bool,
+        error: String,
+        credential_restored: bool,
+    }
+
+    /// In-process HTTP response representation for unit tests.
+    #[derive(Clone, Debug)]
     struct TestHttpResponse {
         status: u16,
-        /// `WWW-Authenticate` values (present on 401s).
+        content_type: String,
         www_authenticate: Vec<String>,
-        /// `Mole-Credential` value, or empty.
         mole_credential: String,
+        cache_control: String,
         body: Vec<u8>,
     }
 
@@ -198,109 +206,133 @@ mod ffi {
 
         fn new_mole_browser_client() -> Box<MoleBrowserClient>;
 
-        /// Start an endorsement grant against the Anchor whose directory
-        /// (the `/.well-known/mole-anchor` JSON) is given. `commitment` is the
-        /// registry's committed parameters for the Anchor's origin; the grant
-        /// is refused unless the advertised key and epoch are both committed.
         fn grant_begin(
             self: &mut MoleBrowserClient,
-            anchor_directory_json: &str,
+            anchor_origin: &str,
+            anchor_config_json: &str,
             commitment: &AnchorCommitment,
+            batch_count: u16,
         ) -> GrantBegin;
 
-        /// Consume a grant-exchange response body; see [`GrantStep`].
-        fn grant_step(self: &mut MoleBrowserClient, response_body: &[u8]) -> GrantStep;
+        fn grant_step(
+            self: &mut MoleBrowserClient,
+            grant_id: u64,
+            response_content_type: &str,
+            response_body: &[u8],
+        ) -> GrantStep;
 
-        /// Evaluate a Moderator 401's `WWW-Authenticate` values.
+        fn grant_abort(self: &mut MoleBrowserClient, grant_id: u64);
+
+        fn next_settlement(
+            self: &MoleBrowserClient,
+            moderator_origin: &str,
+            now_unix_secs: u64,
+        ) -> PendingSettlement;
+
+        fn settle_finish(
+            self: &mut MoleBrowserClient,
+            pending_id: u64,
+            http_status: u16,
+            mole_credential_header: &str,
+        ) -> SettleOutcome;
+
         fn challenge_eval(
             self: &mut MoleBrowserClient,
+            moderator_origin: &str,
             www_authenticate: &Vec<String>,
+            commitment: &ModeratorCommitment,
         ) -> ChallengeEval;
 
-        /// Build the Redeem & Issue `Authorization` header: an endorsement
-        /// presentation plus a batch of ACT issuance requests, sized by the
-        /// policy entry in the Moderator directory JSON.
         fn redeem_begin(
             self: &mut MoleBrowserClient,
-            moderator_directory_json: &str,
+            moderator_origin: &str,
+            moderator_config_json: &str,
             www_authenticate: &Vec<String>,
             commitment: &ModeratorCommitment,
         ) -> RedeemBegin;
 
-        /// Finalize Redeem & Issue from the response's `Mole-Credential`
-        /// value, filling the policy's Credential pool.
         fn redeem_finish(
             self: &mut MoleBrowserClient,
+            redeem_id: u64,
             mole_credential_header: &str,
         ) -> RedeemFinish;
 
-        /// Draw a Credential from the pool and build the presentation
-        /// `Authorization` header answering the given challenge. `commitment`
-        /// pins the policy's `charge`/`topup`; a challenge whose amounts differ
-        /// is refused.
+        fn redeem_abort(self: &mut MoleBrowserClient, redeem_id: u64);
+
         fn present_begin(
             self: &mut MoleBrowserClient,
+            moderator_origin: &str,
+            resource_url: &str,
             www_authenticate: &Vec<String>,
             commitment: &ModeratorCommitment,
+            now_unix_secs: u64,
         ) -> PresentBegin;
 
-        /// Finalize a presentation from the response's `Mole-Credential`
-        /// value: the update becomes the successor Credential and rejoins
-        /// the pool.
         fn present_finish(
             self: &mut MoleBrowserClient,
             presentation_id: u64,
             mole_credential_header: &str,
-        ) -> StatusResult;
+            now_unix_secs: u64,
+        ) -> PresentOutcome;
 
-        /// Abandon a presentation (e.g. network failure after the header was
-        /// built). The Credential was burned when drawn and stays burned: it
-        /// may already have reached the Moderator, so reuse would be a
-        /// double-spend.
-        fn present_abort(self: &mut MoleBrowserClient, presentation_id: u64);
+        fn pool_size(
+            self: &MoleBrowserClient,
+            moderator_origin: &str,
+            credential_context: &[u8],
+        ) -> usize;
 
-        fn pool_size(self: &MoleBrowserClient, policy_context: &[u8]) -> usize;
-        fn balance(self: &MoleBrowserClient, policy_context: &[u8]) -> u64;
+        fn balance(
+            self: &MoleBrowserClient,
+            moderator_origin: &str,
+            credential_context: &[u8],
+        ) -> u64;
+
         fn endorsement_count(self: &MoleBrowserClient) -> usize;
+        fn pending_spend_count(self: &MoleBrowserClient) -> usize;
 
-        // Serialize the durable client state (endorsements + per-policy
-        // credential pools, all secret-bearing) to an opaque blob, and restore
-        // it into a fresh client. The foundation for partitioned on-disk
-        // persistence: the browser persists this blob and reloads it at startup.
-        // Transient in-flight exchange state is intentionally not included.
         fn serialize_state(self: &MoleBrowserClient) -> Vec<u8>;
         fn restore_state(self: &mut MoleBrowserClient, bytes: &[u8]) -> bool;
 
-        // --- In-process test servers (test-only) ---
+        // --- In-process spec-compliant test servers ---
 
         type TestMoleAnchor;
 
-        fn new_test_anchor(endorsement_context: &[u8]) -> Box<TestMoleAnchor>;
-        fn anchor_directory_json(self: &TestMoleAnchor) -> String;
+        fn new_test_anchor(origin: &str, issuance_epoch: &[u8]) -> Box<TestMoleAnchor>;
+        fn anchor_config_json(self: &TestMoleAnchor) -> String;
         fn anchor_public_key(self: &TestMoleAnchor) -> Vec<u8>;
-        /// The registry entry this Anchor would publish: its key and epoch.
-        /// Used to drive the enforcement in tests as a real registry would.
         fn anchor_commitment(self: &TestMoleAnchor) -> AnchorCommitment;
-        /// The grant endpoint: consumes an
-        /// `application/mole-endorsement-request` body.
-        fn handle_endorse(self: &mut TestMoleAnchor, body: &[u8]) -> TestHttpResponse;
+        fn handle_grant(
+            self: &mut TestMoleAnchor,
+            content_type: &str,
+            body: &[u8],
+        ) -> TestHttpResponse;
 
         type TestMoleModerator;
 
+        #[allow(clippy::too_many_arguments)]
         fn new_test_moderator(
+            origin: &str,
             accepted_anchor_keys: &Vec<Blob>,
-            endorsement_context: &[u8],
-            policy_context: &[u8],
-            initial_credits: u64,
-            issuance_batch: u64,
-            charge: u64,
-            refund: u64,
+            issuance_epoch: &[u8],
+            credential_context: &[u8],
+            balance_width: u8,
+            initial_balance: u64,
+            spend_amount: u64,
+            max_top_up: u64,
+            refund_amount: u64,
         ) -> Box<TestMoleModerator>;
-        fn moderator_directory_json(self: &TestMoleModerator) -> String;
-        /// The registry entry this Moderator would publish for its policy.
+
+        fn set_hold_duration_secs(self: &mut TestMoleModerator, hold_secs: u64);
+        fn set_withhold_update(self: &mut TestMoleModerator, withhold: bool);
+        fn set_allow_no_endorsement(self: &mut TestMoleModerator, allow: bool);
+        fn advance_clock_secs(self: &mut TestMoleModerator, delta_secs: u64);
+
+        fn moderator_config_json(self: &TestMoleModerator) -> String;
         fn moderator_commitment(self: &TestMoleModerator) -> ModeratorCommitment;
-        /// The protected resource: `authorization_header` is the raw
-        /// `Authorization` value, or empty for an unauthenticated request.
+        fn handle_issue(
+            self: &mut TestMoleModerator,
+            authorization_header: &str,
+        ) -> TestHttpResponse;
         fn handle_resource(
             self: &mut TestMoleModerator,
             authorization_header: &str,
@@ -312,556 +344,973 @@ mod ffi {
 
 use ffi::{
     AnchorCommitment, Blob, ChallengeEval, CommittedPolicy, GrantBegin, GrantStep,
-    ModeratorCommitment, PresentBegin, RedeemBegin, RedeemFinish, StatusResult, TestHttpResponse,
+    ModeratorCommitment, PendingSettlement, PresentBegin, PresentOutcome, RedeemBegin,
+    RedeemFinish, SettleOutcome, TestHttpResponse,
 };
 
-fn ok_status() -> StatusResult {
-    StatusResult { ok: true, error: String::new() }
-}
-
-fn err_status(error: impl Into<String>) -> StatusResult {
-    StatusResult { ok: false, error: error.into() }
-}
-
 // ---------------------------------------------------------------------------
-// The Client
+// Client State Machine
 // ---------------------------------------------------------------------------
 
-/// An unredeemed Endorsement together with what redemption needs.
+/// Version tag for `MoleClientState` binary persistence (`0x02` = `-01` spec).
+const STATE_FORMAT_VERSION: u8 = 2;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PoolKey {
+    moderator_origin: String,
+    credential_context: Vec<u8>,
+}
+
 struct StoredEndorsement {
-    issued: IssuedEndorsement,
-    anchor_key: Vec<u8>,
-    endorsement_context: Vec<u8>,
+    endorsement: ec_ihat::Endorsement,
+    anchor_origin: String,
+    anchor_key: [u8; 33],
+    issuance_epoch: Vec<u8>,
 }
 
-/// A usable Credential: one independent spend chain in a policy's pool.
 struct StoredCredential {
-    token: CreditToken,
-    act_public_key: ActPublicKey,
-    act_params: ActParams,
+    credential: ec_act::Credential,
+    public_key: ec_act::PublicKey,
+    key_id: [u8; 32],
+    balance_width: u8,
+    ctx_cred: Vec<u8>,
+    issuance_uri: String,
 }
 
-/// The grant flow's state between exchanges.
-enum GrantState {
-    NeedsSignature {
-        pending: ClientNeedsSignature,
-        anchor_key: Vec<u8>,
-        endorsement_context: Vec<u8>,
+enum PendingGrant {
+    AwaitingCommitments {
+        anchor_origin: String,
+        anchor_key_bytes: [u8; 33],
+        public_key: ec_ihat::PublicKey,
+        issuance_epoch: Vec<u8>,
+        requested_count: u16,
     },
-    NeedsProof {
-        pending: ClientNeedsProof,
-        anchor_key: Vec<u8>,
-        endorsement_context: Vec<u8>,
+    AwaitingResponses {
+        anchor_origin: String,
+        anchor_key_bytes: [u8; 33],
+        public_key: ec_ihat::PublicKey,
+        issuance_epoch: Vec<u8>,
+        states: Vec<ec_ihat::ClientState>,
     },
 }
 
-/// Redeem & Issue state held between building the request and finalizing the
-/// response.
 struct PendingRedeem {
-    pre_issuances: Vec<PreIssuance>,
-    issuance_requests: Vec<ActIssuanceRequestMsg>,
-    act_public_key: ActPublicKey,
-    act_params: ActParams,
-    policy_context: Vec<u8>,
-    endorsement_context: Vec<u8>,
+    moderator_origin: String,
+    issuance_uri: String,
+    credential_context: Vec<u8>,
+    ctx_cred: Vec<u8>,
+    balance_width: u8,
+    expected_initial_balance: u64,
+    public_key: ec_act::PublicKey,
+    key_id: [u8; 32],
+    params: ec_act::Params,
+    issuance_state: ec_act::ClientIssuanceState,
 }
 
-/// A presentation in flight: what finalizing its update needs.
-struct InFlightPresentation {
-    pre_refund: PreRefund,
-    spend: SpendProof,
-    act_public_key: ActPublicKey,
-    act_params: ActParams,
-    policy_context: Vec<u8>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingSpendStatus {
+    InFlight,
+    Held { hold_until_unix_secs: u64 },
 }
 
-/// The Client side of the MoLE architecture, as a sans-I/O state machine.
+struct PendingSpend {
+    status: PendingSpendStatus,
+    moderator_origin: String,
+    issuance_uri: String,
+    resource_url: String,
+    credential_context: Vec<u8>,
+    ctx_cred: Vec<u8>,
+    balance_width: u8,
+    public_key: ec_act::PublicKey,
+    key_id: [u8; 32],
+    spend_state: ec_act::ClientSpendState,
+    presentation_bytes: Vec<u8>,
+    recovery_handle: [u8; 96],
+}
+
+/// Sans-I/O MOLE Client state machine.
 pub struct MoleBrowserClient {
     endorsements: Vec<StoredEndorsement>,
-    /// Per-policy Credential pools (FIFO: draw front, successors rejoin at
-    /// the back).
-    pools: HashMap<Vec<u8>, VecDeque<StoredCredential>>,
-    /// At most one grant runs at a time (demo simplification).
-    grant: Option<GrantState>,
-    /// At most one redemption runs at a time (demo simplification).
-    redeem: Option<PendingRedeem>,
-    in_flight: HashMap<u64, InFlightPresentation>,
-    next_presentation_id: u64,
+    pools: HashMap<PoolKey, VecDeque<StoredCredential>>,
+    grants: HashMap<u64, PendingGrant>,
+    redeems: HashMap<u64, PendingRedeem>,
+    pending_spends: HashMap<u64, PendingSpend>,
+    next_id: u64,
 }
 
-fn new_mole_browser_client() -> Box<MoleBrowserClient> {
+pub fn new_mole_browser_client() -> Box<MoleBrowserClient> {
     Box::new(MoleBrowserClient {
         endorsements: Vec::new(),
         pools: HashMap::new(),
-        grant: None,
-        redeem: None,
-        in_flight: HashMap::new(),
-        next_presentation_id: 1,
+        grants: HashMap::new(),
+        redeems: HashMap::new(),
+        pending_spends: Vec::new().into_iter().collect(),
+        next_id: 1,
     })
 }
 
-/// Parse the two Moderator challenges out of `WWW-Authenticate` values,
-/// ignoring challenges of unknown type.
+struct ParsedModeratorChallenges {
+    raw_act_challenge: Vec<u8>,
+    act_challenge: EcActChallenge,
+    ihat_redeem_challenge: Option<[u8; 32]>,
+    no_endorsement_redeem_challenge: Option<[u8; 32]>,
+}
+
 fn parse_moderator_challenges(
     header_values: &[String],
-) -> Result<(CredentialChallenge, ActChallenge, ModeratorChallenge), String> {
-    let refs: Vec<&str> = header_values.iter().map(|s| s.as_str()).collect();
-    let challenges: Vec<MoleChallenge> = parse_challenges(&refs);
+) -> Result<ParsedModeratorChallenges, String> {
+    let refs: Vec<&str> = header_values.iter().map(String::as_str).collect();
+    let challenges = parse_challenges(&refs);
 
-    let mut credential = None;
-    let mut moderator = None;
-    for challenge in &challenges {
-        if credential.is_none() {
-            if let Ok(c) = CredentialChallenge::from_bytes(&challenge.challenge) {
-                if c.credential_type == credential_type::ACT {
-                    credential = Some(c);
-                    continue;
+    let mut cred_pair: Option<(Vec<u8>, EcActChallenge)> = None;
+    let mut ihat_redeem: Option<[u8; 32]> = None;
+    let mut no_end_redeem: Option<[u8; 32]> = None;
+
+    for ch in challenges {
+        match ch {
+            MoleChallenge::Credential {
+                credential_type: credential_type::EC_ACT,
+                challenge,
+            } if cred_pair.is_none() => {
+                if let Ok(decoded) = EcActChallenge::from_bytes(&challenge) {
+                    cred_pair = Some((challenge, decoded));
                 }
             }
-        }
-        if moderator.is_none() {
-            if let Ok(m) = ModeratorChallenge::from_bytes(&challenge.challenge) {
-                if m.endorsement_type == endorsement_type::IHAT {
-                    moderator = Some(m);
-                }
+            MoleChallenge::Redeem {
+                endorsement_type: endorsement_type::EC_IHAT,
+                challenge,
+            } if ihat_redeem.is_none() => {
+                ihat_redeem = Some(challenge);
             }
+            MoleChallenge::Redeem {
+                endorsement_type: endorsement_type::NO_ENDORSEMENT,
+                challenge,
+            } if no_end_redeem.is_none() => {
+                no_end_redeem = Some(challenge);
+            }
+            _ => {}
         }
     }
-    let (Some(credential), Some(moderator)) = (credential, moderator) else {
-        return Err("no recognizable credential + endorsement challenge pair".into());
+
+    let Some((raw_act_challenge, act_challenge)) = cred_pair else {
+        return Err("missing valid challenge-0001 in WWW-Authenticate".into());
     };
-    let act = ActChallenge::from_bytes(&credential.challenge)
-        .map_err(|e| format!("malformed ACT challenge: {e}"))?;
-    Ok((credential, act, moderator))
+    Ok(ParsedModeratorChallenges {
+        raw_act_challenge,
+        act_challenge,
+        ihat_redeem_challenge: ihat_redeem,
+        no_endorsement_redeem_challenge: no_end_redeem,
+    })
+}
+
+fn canonicalize_origin(origin: &str) -> Result<String, String> {
+    let (canon, _) = validate_https_endpoint_uri(origin).map_err(|e| e.to_string())?;
+    Ok(canon)
 }
 
 impl MoleBrowserClient {
-    fn grant_begin(
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+
+    pub fn grant_begin(
         &mut self,
-        anchor_directory_json: &str,
+        anchor_origin: &str,
+        anchor_config_json: &str,
         commitment: &AnchorCommitment,
+        batch_count: u16,
     ) -> GrantBegin {
         let fail = |error: String| GrantBegin {
             ok: false,
             error,
-            endorse_path: String::new(),
+            grant_id: 0,
+            grant_uri: String::new(),
+            content_type: String::new(),
             request_body: Vec::new(),
         };
 
-        // Fail-closed: an Anchor with no registry entry cannot be used. The
-        // key and epoch below are checked against the committed set, so a
-        // server cannot mint a per-user key or epoch to tag the endorsement.
         if !commitment.found {
             return fail("anchor is not enrolled in the key-commitment registry".into());
         }
-
-        let directory: AnchorDirectory = match serde_json::from_str(anchor_directory_json) {
-            Ok(d) => d,
-            Err(e) => return fail(format!("malformed anchor directory: {e}")),
+        let count = if batch_count == 0 {
+            DEFAULT_GRANT_BATCH_COUNT
+        } else {
+            batch_count.min(64)
         };
-        let Some(config) = directory
-            .endorsement_configs
-            .iter()
-            .find(|c| c.endorsement_type == endorsement_type::IHAT)
-        else {
-            return fail("anchor offers no IHAT config".into());
+        let Ok(expected_origin) = canonicalize_origin(anchor_origin) else {
+            return fail("anchor origin must be https".into());
         };
-        let anchor_key = match mole_core::http::b64_decode(&config.public_key) {
-            Ok(k) => k,
-            Err(e) => return fail(format!("anchor key encoding: {e}")),
-        };
-        if decode_anchor_key(&anchor_key).is_err() {
-            return fail("anchor key does not decode".into());
-        }
-        if !commitment.keys.iter().any(|k| k.bytes[..] == anchor_key[..]) {
-            return fail("anchor key is not in the committed set".into());
-        }
-        let endorsement_context = match mole_core::http::b64_decode(&config.endorsement_context) {
+        let config: AnchorConfiguration = match serde_json::from_str(anchor_config_json) {
             Ok(c) => c,
-            Err(e) => return fail(format!("endorsement context encoding: {e}")),
+            Err(e) => return fail(format!("malformed anchor configuration JSON: {e}")),
         };
-        if !commitment.epochs.iter().any(|e| e.bytes[..] == endorsement_context[..]) {
-            return fail("endorsement epoch is not committed".into());
+        let validated = match config.validate_ec_ihat() {
+            Ok(v) => v,
+            Err(e) => return fail(format!("invalid anchor configuration: {e}")),
+        };
+        if validated.origin != expected_origin {
+            return fail("anchor grant-uri must be same-origin with anchor".into());
+        }
+        if !commitment.grant_uri.is_empty() && validated.grant_uri != commitment.grant_uri {
+            return fail("anchor grant-uri does not match committed grant-uri".into());
+        }
+        if !commitment
+            .keys
+            .iter()
+            .any(|k| k.bytes.as_slice() == validated.anchor_key_bytes)
+        {
+            return fail("anchor-key is not in the committed key set".into());
+        }
+        if !commitment
+            .epochs
+            .iter()
+            .any(|e| e.bytes == validated.issuance_epoch)
+        {
+            return fail("issuance-epoch is not in the committed epoch set".into());
         }
 
-        // The nullifier is Client-chosen and never seen by the Anchor.
-        let mut nf = [0u8; 32];
-        fill_random(&mut nf);
-        let (signature_request, pending) =
-            ClientNeedsSignature::request(nf.to_vec(), endorsement_context.clone());
-        let Ok(signature_request_bytes) = signature_request.to_wire() else {
-            return fail("signature request does not encode".into());
+        let Ok(request_body) = (GrantRequest { count }).to_bytes() else {
+            return fail("failed to encode GrantRequest".into());
+        };
+        let Ok(content_type) = format_endorsement_request_media_type(endorsement_type::EC_IHAT)
+        else {
+            return fail("failed to format endorsement media type".into());
         };
 
-        self.grant = Some(GrantState::NeedsSignature { pending, anchor_key, endorsement_context });
+        let grant_id = self.alloc_id();
+        self.grants.insert(
+            grant_id,
+            PendingGrant::AwaitingCommitments {
+                anchor_origin: expected_origin,
+                anchor_key_bytes: validated.anchor_key_bytes,
+                public_key: validated.public_key,
+                issuance_epoch: validated.issuance_epoch,
+                requested_count: count,
+            },
+        );
 
-        let body = EndorsementRequest {
-            endorsement_type: endorsement_type::IHAT,
-            body: IhatGrantRequest::Step1 { signature_request: signature_request_bytes }.to_bytes(),
-        };
         GrantBegin {
             ok: true,
             error: String::new(),
-            endorse_path: config.endorse_endpoint.clone(),
-            request_body: body.to_bytes(),
+            grant_id,
+            grant_uri: validated.grant_uri,
+            content_type,
+            request_body,
         }
     }
 
-    fn grant_step(&mut self, response_body: &[u8]) -> GrantStep {
-        let fail =
-            |error: String| GrantStep { ok: false, error, done: false, request_body: Vec::new() };
+    pub fn grant_step(
+        &mut self,
+        grant_id: u64,
+        response_content_type: &str,
+        response_body: &[u8],
+    ) -> GrantStep {
+        let fail = |error: String| GrantStep {
+            ok: false,
+            error,
+            done: false,
+            granted_count: 0,
+            content_type: String::new(),
+            request_body: Vec::new(),
+        };
 
-        let Some(state) = self.grant.take() else {
-            return fail("no grant in progress".into());
+        let Some(state) = self.grants.remove(&grant_id) else {
+            return fail("unknown or completed grant_id".into());
         };
-        let response = match EndorsementResponse::from_bytes(response_body) {
-            Ok(r) => r,
-            Err(e) => return fail(format!("malformed EndorsementResponse: {e}")),
-        };
-        if response.endorsement_type != endorsement_type::IHAT {
-            return fail("anchor answered with an unknown endorsement type".into());
+
+        match parse_endorsement_response_media_type(response_content_type) {
+            Ok(t) if t == endorsement_type::EC_IHAT => {}
+            _ => return fail("unexpected or missing grant response Content-Type".into()),
         }
-        let grant_response = match IhatGrantResponse::from_bytes(&response.body) {
-            Ok(r) => r,
-            Err(e) => return fail(format!("malformed grant response body: {e}")),
-        };
 
-        match (state, grant_response) {
-            (
-                GrantState::NeedsSignature { pending, anchor_key, endorsement_context },
-                IhatGrantResponse::Step1 { session_id, signature },
-            ) => {
-                let Ok(signature) = Signature::from_wire(&signature) else {
-                    return fail("malformed Signature".into());
+        match state {
+            PendingGrant::AwaitingCommitments {
+                anchor_origin,
+                anchor_key_bytes,
+                public_key,
+                issuance_epoch,
+                requested_count,
+            } => {
+                let Ok(grant_commitments) = GrantCommitments::from_bytes(response_body) else {
+                    return fail("malformed GrantCommitments".into());
                 };
-                let Ok(anchor_public_key) = decode_anchor_key(&anchor_key) else {
-                    return fail("anchor key does not decode".into());
+                if grant_commitments.commitments.len() > usize::from(requested_count) {
+                    return fail("Anchor returned more commitments than requested".into());
+                }
+                let mut states = Vec::with_capacity(grant_commitments.commitments.len());
+                let mut challenges = Vec::with_capacity(grant_commitments.commitments.len());
+                for commitment in &grant_commitments.commitments {
+                    let Ok((client_state, challenge_msg)) = ec_ihat::challenge(
+                        &public_key,
+                        &issuance_epoch,
+                        EC_IHAT_CTX_RED,
+                        commitment,
+                    ) else {
+                        return fail("EC-IHAT challenge generation failed".into());
+                    };
+                    states.push(client_state);
+                    challenges.push(challenge_msg);
+                }
+                let Ok(request_body) = (GrantChallenges {
+                    session_id: grant_commitments.session_id,
+                    challenges,
+                })
+                .to_bytes() else {
+                    return fail("failed to encode GrantChallenges".into());
                 };
-                let (proof_request, pending) = pending.request_proof(anchor_public_key, signature);
-                let Ok(proof_request_bytes) = proof_request.to_wire() else {
-                    return fail("proof request does not encode".into());
+                let Ok(content_type) =
+                    format_endorsement_request_media_type(endorsement_type::EC_IHAT)
+                else {
+                    return fail("failed to format media type".into());
                 };
-                self.grant =
-                    Some(GrantState::NeedsProof { pending, anchor_key, endorsement_context });
-                let body = EndorsementRequest {
-                    endorsement_type: endorsement_type::IHAT,
-                    body: IhatGrantRequest::Step2 {
-                        session_id,
-                        proof_request: proof_request_bytes,
-                    }
-                    .to_bytes(),
-                };
+                self.grants.insert(
+                    grant_id,
+                    PendingGrant::AwaitingResponses {
+                        anchor_origin,
+                        anchor_key_bytes,
+                        public_key,
+                        issuance_epoch,
+                        states,
+                    },
+                );
                 GrantStep {
                     ok: true,
                     error: String::new(),
                     done: false,
-                    request_body: body.to_bytes(),
+                    granted_count: 0,
+                    content_type,
+                    request_body,
                 }
             }
-            (
-                GrantState::NeedsProof { pending, anchor_key, endorsement_context },
-                IhatGrantResponse::Step2 { proof },
-            ) => {
-                let Ok(proof) = Proof::from_wire(&proof) else {
-                    return fail("malformed Proof".into());
+            PendingGrant::AwaitingResponses {
+                anchor_origin,
+                anchor_key_bytes,
+                public_key,
+                issuance_epoch,
+                states,
+            } => {
+                let Ok(grant_responses) = GrantResponses::from_bytes(response_body) else {
+                    return fail("malformed GrantResponses".into());
                 };
-                // On failure the session must be discarded, never retried
-                // with the same state.
-                let Some(issued) = pending.finalize(proof) else {
-                    return fail("endorsement finalization failed; session discarded".into());
-                };
-                self.endorsements.push(StoredEndorsement {
-                    issued,
-                    anchor_key,
-                    endorsement_context,
-                });
-                GrantStep { ok: true, error: String::new(), done: true, request_body: Vec::new() }
-            }
-            _ => fail("anchor answered with the wrong grant step".into()),
-        }
-    }
-
-    fn challenge_eval(&mut self, www_authenticate: &Vec<String>) -> ChallengeEval {
-        match parse_moderator_challenges(www_authenticate) {
-            Ok((_credential, act, moderator)) => {
-                let needs_redeem =
-                    self.pools.get(&act.policy_context).map_or(true, |pool| pool.is_empty());
-                // Redemption needs an Endorsement from an Anchor in the
-                // accepted set. The epoch check happens in redeem_begin —
-                // the challenge carries only the key set, the epoch lives in
-                // the Moderator directory, which is not available here.
-                let needs_endorsement = needs_redeem
-                    && IhatChallenge::from_bytes(&moderator.challenge)
-                        .map(|c| self.usable_endorsement(&c, None).is_none())
-                        .unwrap_or(true);
-                ChallengeEval {
+                if grant_responses.responses.len() != states.len() {
+                    return fail("GrantResponses count does not match challenges sent".into());
+                }
+                // `draft-jms-mole-protocols-01` §4.4.2 step 3: if Finalize fails
+                // for ANY session, discard EVERY session and finalized endorsement
+                // in the batch!
+                let mut batch_endorsements = Vec::with_capacity(states.len());
+                for (client_state, response_msg) in states.into_iter().zip(&grant_responses.responses)
+                {
+                    let Ok(endorsement) =
+                        ec_ihat::finalize(&public_key, client_state, response_msg)
+                    else {
+                        return fail("EC-IHAT finalize failed; entire batch discarded".into());
+                    };
+                    batch_endorsements.push(StoredEndorsement {
+                        endorsement,
+                        anchor_origin: anchor_origin.clone(),
+                        anchor_key: anchor_key_bytes,
+                        issuance_epoch: issuance_epoch.clone(),
+                    });
+                }
+                let granted_count = batch_endorsements.len();
+                self.endorsements.extend(batch_endorsements);
+                GrantStep {
                     ok: true,
                     error: String::new(),
-                    policy_context: act.policy_context,
-                    needs_redeem,
-                    needs_endorsement,
+                    done: true,
+                    granted_count,
+                    content_type: String::new(),
+                    request_body: Vec::new(),
                 }
             }
-            Err(error) => ChallengeEval {
-                ok: false,
-                error,
-                policy_context: Vec::new(),
-                needs_redeem: false,
-                needs_endorsement: false,
-            },
         }
     }
 
-    /// The index of a stored Endorsement whose Anchor is in the accepted
-    /// set — and, when the expected endorsement context (epoch) is known,
-    /// whose epoch matches it.
-    fn usable_endorsement(
+    pub fn grant_abort(&mut self, grant_id: u64) {
+        self.grants.remove(&grant_id);
+    }
+
+    pub fn next_settlement(&self, moderator_origin: &str, now_unix_secs: u64) -> PendingSettlement {
+        let empty = PendingSettlement {
+            has_pending: false,
+            pending_id: 0,
+            is_signoff: false,
+            issuance_uri: String::new(),
+            authorization_header: String::new(),
+        };
+        let Ok(canon_origin) = canonicalize_origin(moderator_origin) else {
+            return empty;
+        };
+        let mut candidate_ids: Vec<u64> = self
+            .pending_spends
+            .iter()
+            .filter(|(_, p)| p.moderator_origin == canon_origin)
+            .map(|(&id, _)| id)
+            .collect();
+        candidate_ids.sort_unstable();
+        let Some(&pending_id) = candidate_ids.first() else {
+            return empty;
+        };
+        let pending = &self.pending_spends[&pending_id];
+        let is_signoff = match pending.status {
+            PendingSpendStatus::InFlight => false,
+            PendingSpendStatus::Held {
+                hold_until_unix_secs,
+            } => now_unix_secs < hold_until_unix_secs,
+        };
+        let auth = if is_signoff {
+            MoleAuthorization::Signoff {
+                credential_type: credential_type::EC_ACT,
+                recovery_handle: pending.recovery_handle.to_vec(),
+            }
+        } else {
+            MoleAuthorization::Recovery {
+                credential_type: credential_type::EC_ACT,
+                recovery_handle: pending.recovery_handle.to_vec(),
+            }
+        };
+        let Ok(authorization_header) = auth.to_header_value() else {
+            return empty;
+        };
+        PendingSettlement {
+            has_pending: true,
+            pending_id,
+            is_signoff,
+            issuance_uri: pending.issuance_uri.clone(),
+            authorization_header,
+        }
+    }
+
+    pub fn settle_finish(
+        &mut self,
+        pending_id: u64,
+        http_status: u16,
+        mole_credential_header: &str,
+    ) -> SettleOutcome {
+        let Some(pending) = self.pending_spends.remove(&pending_id) else {
+            return SettleOutcome {
+                ok: false,
+                error: "unknown pending_id".into(),
+                credential_restored: false,
+            };
+        };
+
+        // `404` means the recovery window ended or no record exists (`draft-jms-mole-http-transport-01` §5.4).
+        // Per `draft-jms-mole-protocols-01` §5.2.5, discard the spend state.
+        if http_status == 404 {
+            return SettleOutcome {
+                ok: true,
+                error: String::new(),
+                credential_restored: false,
+            };
+        }
+
+        if mole_credential_header.is_empty() {
+            // Transport drop or transient 5xx: keep pending state so a later retry can recover!
+            self.pending_spends.insert(pending_id, pending);
+            return SettleOutcome {
+                ok: false,
+                error: "missing Mole-Credential on settlement response".into(),
+                credential_restored: false,
+            };
+        }
+
+        match MoleCredential::parse(mole_credential_header) {
+            Ok(MoleCredential::Update {
+                credential_type: credential_type::EC_ACT,
+                update: None,
+            }) => {
+                // Recorded `NoUpdate`: chain intentionally ended by Moderator.
+                SettleOutcome {
+                    ok: true,
+                    error: String::new(),
+                    credential_restored: false,
+                }
+            }
+            Ok(MoleCredential::Update {
+                credential_type: credential_type::EC_ACT,
+                update: Some(bytes),
+            }) => {
+                let Ok(params) = ec_act::Params::new(pending.balance_width) else {
+                    return SettleOutcome {
+                        ok: false,
+                        error: "invalid balance_width".into(),
+                        credential_restored: false,
+                    };
+                };
+                let Ok(act_update) = EcActUpdate::from_bytes(&params, &bytes) else {
+                    self.pending_spends.insert(pending_id, pending);
+                    return SettleOutcome {
+                        ok: false,
+                        error: "malformed EcActUpdate on settlement".into(),
+                        credential_restored: false,
+                    };
+                };
+                let spend_backup = pending.spend_state.to_bytes();
+                let Ok(credential) = ec_act::finalize_refund(
+                    &params,
+                    &pending.public_key,
+                    &pending.ctx_cred,
+                    pending.spend_state,
+                    &act_update.refund,
+                ) else {
+                    if let Ok(restored_spend_state) =
+                        ec_act::ClientSpendState::from_bytes(&params, &spend_backup)
+                    {
+                        self.pending_spends.insert(
+                            pending_id,
+                            PendingSpend {
+                                status: pending.status,
+                                moderator_origin: pending.moderator_origin,
+                                issuance_uri: pending.issuance_uri,
+                                resource_url: pending.resource_url,
+                                credential_context: pending.credential_context,
+                                ctx_cred: pending.ctx_cred,
+                                balance_width: pending.balance_width,
+                                public_key: pending.public_key,
+                                key_id: pending.key_id,
+                                spend_state: restored_spend_state,
+                                presentation_bytes: pending.presentation_bytes,
+                                recovery_handle: pending.recovery_handle,
+                            },
+                        );
+                    }
+                    return SettleOutcome {
+                        ok: false,
+                        error: "settlement refund verification failed".into(),
+                        credential_restored: false,
+                    };
+                };
+                let key = PoolKey {
+                    moderator_origin: pending.moderator_origin,
+                    credential_context: pending.credential_context,
+                };
+                self.pools.entry(key).or_default().push_back(StoredCredential {
+                    credential,
+                    public_key: pending.public_key,
+                    key_id: pending.key_id,
+                    balance_width: pending.balance_width,
+                    ctx_cred: pending.ctx_cred,
+                    issuance_uri: pending.issuance_uri,
+                });
+                SettleOutcome {
+                    ok: true,
+                    error: String::new(),
+                    credential_restored: true,
+                }
+            }
+            _ => {
+                self.pending_spends.insert(pending_id, pending);
+                SettleOutcome {
+                    ok: false,
+                    error: "unexpected Mole-Credential parameter on settlement".into(),
+                    credential_restored: false,
+                }
+            }
+        }
+    }
+
+    fn drain_insufficient_credentials(
+        &mut self,
+        key: &PoolKey,
+        spend_amount: u64,
+        max_top_up: u64,
+    ) -> bool {
+        let Some(pool) = self.pools.get_mut(key) else {
+            return false;
+        };
+        while let Some(front) = pool.front() {
+            let max_bal = u64::MAX >> (64 - u32::from(front.balance_width));
+            let bal = front.credential.balance();
+            let covers_spend = bal >= spend_amount;
+            let fits_top_up = bal
+                .checked_add(max_top_up)
+                .is_some_and(|sum| sum <= max_bal);
+            if covers_spend && fits_top_up {
+                return true;
+            }
+            // Drop exhausted credential so subsequent attempts steer cleanly into Redeem & Issue.
+            pool.pop_front();
+        }
+        false
+    }
+
+    fn find_usable_endorsement(
         &self,
-        challenge: &IhatChallenge,
-        expected_context: Option<&[u8]>,
+        accepted_keys: &[[u8; 33]],
+        accepted_epochs: &[Vec<u8>],
     ) -> Option<usize> {
         self.endorsements.iter().position(|e| {
-            expected_context.map_or(true, |c| e.endorsement_context == c)
-                && challenge.keys.iter().any(|k| k[..] == e.anchor_key[..])
+            accepted_epochs.iter().any(|ep| ep == &e.issuance_epoch)
+                && accepted_keys.iter().any(|k| k == &e.anchor_key)
         })
     }
 
-    fn redeem_begin(
+    pub fn challenge_eval(
         &mut self,
-        moderator_directory_json: &str,
+        moderator_origin: &str,
         www_authenticate: &Vec<String>,
         commitment: &ModeratorCommitment,
-    ) -> RedeemBegin {
-        let fail =
-            |error: String| RedeemBegin { ok: false, error, authorization_header: String::new() };
+    ) -> ChallengeEval {
+        let fail = |error: String| ChallengeEval {
+            ok: false,
+            error,
+            credential_context: Vec::new(),
+            needs_redeem: false,
+            needs_endorsement: false,
+        };
 
-        // Fail-closed: a Moderator with no registry entry cannot be redeemed
-        // against.
         if !commitment.found {
             return fail("moderator is not enrolled in the key-commitment registry".into());
         }
-
-        let (_credential_challenge, act_challenge, moderator_challenge) =
-            match parse_moderator_challenges(www_authenticate) {
-                Ok(c) => c,
-                Err(e) => return fail(e),
-            };
-        let ihat_challenge = match IhatChallenge::from_bytes(&moderator_challenge.challenge) {
-            Ok(c) => c,
-            Err(e) => return fail(format!("malformed IHAT challenge: {e}")),
+        let Ok(canon_origin) = canonicalize_origin(moderator_origin) else {
+            return fail("moderator origin must be https".into());
         };
-
-        // The committed policy pins every partitionable parameter. Refuse if
-        // the challenged policy is not committed for this Moderator.
+        let parsed = match parse_moderator_challenges(www_authenticate) {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
         let Some(committed) = commitment
             .policies
             .iter()
-            .find(|p| p.policy_context[..] == act_challenge.policy_context[..])
+            .find(|p| p.credential_context == parsed.act_challenge.credential_context)
         else {
-            return fail("policy is not committed for this moderator".into());
+            return fail("challenged credential_context is not committed for this moderator".into());
         };
-        // The accepted Anchor set is the OR-proof's anonymity set. It must be
-        // the whole committed set in the committed order — never a server-
-        // chosen subset or reordering — or a Moderator could shrink/craft it
-        // per user to deanonymize.
-        if ihat_challenge.keys.len() != committed.accepted_anchor_keys.len()
-            || ihat_challenge
-                .keys
-                .iter()
-                .zip(&committed.accepted_anchor_keys)
-                .any(|(k, c)| k[..] != c.bytes[..])
+        if parsed.act_challenge.spend_amount != committed.spend_amount
+            || parsed.act_challenge.max_top_up != committed.max_top_up
         {
-            return fail("challenge accepted set does not match the committed set".into());
+            return fail("challenged spend_amount/max_top_up differ from committed policy".into());
         }
 
-        let directory: ModeratorDirectory = match serde_json::from_str(moderator_directory_json) {
-            Ok(d) => d,
-            Err(e) => return fail(format!("malformed moderator directory: {e}")),
+        let key = PoolKey {
+            moderator_origin: canon_origin,
+            credential_context: parsed.act_challenge.credential_context.clone(),
         };
-        let Some(policy) = directory.policies.into_iter().find(|p| {
-            mole_core::http::b64_decode(&p.policy_context)
-                .map(|c| c == act_challenge.policy_context)
-                .unwrap_or(false)
-        }) else {
-            return fail("moderator directory lacks the challenged policy".into());
-        };
-        if policy.act_balance_digits != BALANCE_DIGITS as u64 {
-            return fail(format!(
-                "policy uses {} balance digits, this client is built with {}",
-                policy.act_balance_digits, BALANCE_DIGITS
-            ));
-        }
-        let act_public_key_bytes = match mole_core::http::b64_decode(&policy.act_public_key) {
-            Ok(b) => b,
-            Err(e) => return fail(format!("ACT key encoding: {e}")),
-        };
-        // The directory-advertised ACT key and domain separator must be the
-        // committed ones: otherwise a per-user ACT key would deanonymize at
-        // spend.
-        if act_public_key_bytes[..] != committed.act_public_key[..] {
-            return fail("ACT public key is not committed".into());
-        }
-        let act_public_key = match ActPublicKey::from_wire(&act_public_key_bytes) {
-            Ok(k) => k,
-            Err(e) => return fail(format!("ACT key: {e:?}")),
-        };
-        let domain_separator = match mole_core::http::b64_decode(&policy.act_domain_separator) {
-            Ok(d) => d,
-            Err(e) => return fail(format!("ACT domain separator encoding: {e}")),
-        };
-        if domain_separator[..] != committed.act_domain_separator[..] {
-            return fail("ACT domain separator is not committed".into());
-        }
-        let act_params = ActParams::from_domain_separator(&domain_separator);
-        let expected_context = match mole_core::http::b64_decode(&policy.endorsement_context) {
-            Ok(c) => c,
-            Err(e) => return fail(format!("endorsement context encoding: {e}")),
-        };
-        if !committed.epochs.iter().any(|e| e.bytes[..] == expected_context[..]) {
-            return fail("redemption epoch is not committed".into());
-        }
+        let has_usable = self.drain_insufficient_credentials(
+            &key,
+            parsed.act_challenge.spend_amount,
+            parsed.act_challenge.max_top_up,
+        );
+        let needs_redeem = !has_usable;
 
-        // Find an Endorsement from an Anchor in the accepted set, granted in
-        // the epoch the Moderator accepts.
-        let Some(index) = self.usable_endorsement(&ihat_challenge, Some(&expected_context)) else {
-            return fail("no stored endorsement is usable against this challenge".into());
-        };
-        let endorsement = self.endorsements.swap_remove(index);
-        let Some(true_index) =
-            ihat_challenge.keys.iter().position(|k| k[..] == endorsement.anchor_key[..])
-        else {
-            return fail("endorsement anchor left the accepted set".into());
-        };
-
-        // Redeem: the presentation is bound to the digest of the challenge
-        // that triggered it.
-        let accepted: Vec<IhatKey> = match ihat_challenge
-            .keys
-            .iter()
-            .map(|k| decode_anchor_key(k))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(a) => a,
-            Err(e) => return fail(format!("accepted set key: {e}")),
-        };
-        let binding = challenge_digest(&moderator_challenge.to_bytes());
-        let presentation = endorsement.issued.show(&accepted, true_index, &binding);
-        let Ok(presentation_bytes) = presentation.to_wire() else {
-            return fail("presentation does not encode".into());
-        };
-
-        // Issue: the batch of ACT issuance requests rides along. The batch
-        // size is the policy's constant.
-        let Ok(batch) = usize::try_from(policy.issuance_batch) else {
-            return fail("absurd issuance batch".into());
-        };
-        if batch == 0 || batch > 64 {
-            return fail("issuance batch out of range".into());
-        }
-        let pre_issuances: Vec<PreIssuance> = (0..batch).map(|_| PreIssuance::random()).collect();
-        let issuance_requests: Vec<ActIssuanceRequestMsg> =
-            pre_issuances.iter().map(|pre| pre.request(&act_params)).collect();
-
-        let request = CredentialRequest {
-            endorsement_type: endorsement_type::IHAT,
-            endorsement_presentation: IhatPresentation { bytes: presentation_bytes }.to_bytes(),
-            credential_type: credential_type::ACT,
-            issuance_request: ActIssuanceRequest {
-                truncated_key_id: truncated_key_id(&act_public_key_bytes),
-                requests: issuance_requests
+        let mut needs_endorsement = false;
+        if needs_redeem {
+            let can_use_no_endorsement = committed.allow_no_endorsement
+                && parsed.no_endorsement_redeem_challenge.is_some();
+            if !can_use_no_endorsement {
+                if parsed.ihat_redeem_challenge.is_none() {
+                    return fail("challenge offers no usable redeem-T parameter".into());
+                }
+                let committed_keys: Option<Vec<[u8; 33]>> = committed
+                    .accepted_anchor_keys
                     .iter()
-                    .map(|r| r.to_wire().expect("issuance request encodes"))
-                    .collect(),
+                    .map(|b| b.bytes.as_slice().try_into().ok())
+                    .collect();
+                let Some(committed_keys) = committed_keys else {
+                    return fail("committed accepted_anchor_keys has non-33B entry".into());
+                };
+                let committed_epochs: Vec<Vec<u8>> =
+                    committed.epochs.iter().map(|e| e.bytes.clone()).collect();
+                needs_endorsement =
+                    self.find_usable_endorsement(&committed_keys, &committed_epochs).is_none();
             }
-            .to_bytes(),
+        }
+
+        ChallengeEval {
+            ok: true,
+            error: String::new(),
+            credential_context: parsed.act_challenge.credential_context,
+            needs_redeem,
+            needs_endorsement,
+        }
+    }
+
+    pub fn redeem_begin(
+        &mut self,
+        moderator_origin: &str,
+        moderator_config_json: &str,
+        www_authenticate: &Vec<String>,
+        commitment: &ModeratorCommitment,
+    ) -> RedeemBegin {
+        let fail = |error: String| RedeemBegin {
+            ok: false,
+            error,
+            redeem_id: 0,
+            issuance_uri: String::new(),
+            authorization_header: String::new(),
         };
 
-        self.redeem = Some(PendingRedeem {
-            pre_issuances,
-            issuance_requests,
-            act_public_key,
-            act_params,
-            policy_context: act_challenge.policy_context,
-            endorsement_context: endorsement.endorsement_context,
-        });
+        if !commitment.found {
+            return fail("moderator is not enrolled in the key-commitment registry".into());
+        }
+        let Ok(canon_origin) = canonicalize_origin(moderator_origin) else {
+            return fail("moderator origin must be https".into());
+        };
+        let parsed = match parse_moderator_challenges(www_authenticate) {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
+        let Some(committed) = commitment
+            .policies
+            .iter()
+            .find(|p| p.credential_context == parsed.act_challenge.credential_context)
+        else {
+            return fail("challenged credential_context is not committed".into());
+        };
+        if parsed.act_challenge.spend_amount != committed.spend_amount
+            || parsed.act_challenge.max_top_up != committed.max_top_up
+        {
+            return fail("challenged spend_amount/max_top_up differ from committed policy".into());
+        }
+
+        let mod_cfg_raw: ModeratorConfiguration = match serde_json::from_str(moderator_config_json)
+        {
+            Ok(c) => c,
+            Err(e) => return fail(format!("malformed moderator configuration JSON: {e}")),
+        };
+        let validated_mod = match mod_cfg_raw.validate() {
+            Ok(v) => v,
+            Err(e) => return fail(format!("invalid moderator configuration: {e}")),
+        };
+        if validated_mod.issuance_origin != canon_origin {
+            return fail("moderator issuance-uri must be same-origin with moderator".into());
+        }
+        if !committed.issuance_uri.is_empty()
+            && validated_mod.issuance_uri != committed.issuance_uri
+        {
+            return fail("moderator issuance-uri does not match committed issuance-uri".into());
+        }
+
+        // Match and verify the committed EC-ACT key & balance_width.
+        let Some(act_key): Option<&ValidatedEcActKey> = validated_mod
+            .ec_act_keys
+            .iter()
+            .find(|k| k.credential_context == committed.credential_context)
+        else {
+            return fail("moderator configuration lacks challenged credential-context".into());
+        };
+        if act_key.public_key_bytes.as_slice() != committed.credential_key.as_slice() {
+            return fail("moderator credential-key does not match committed key".into());
+        }
+        if act_key.balance_width != committed.balance_width {
+            return fail("moderator balance-width does not match committed balance-width".into());
+        }
+        let Ok(params) = ec_act::Params::new(act_key.balance_width) else {
+            return fail("invalid balance-width".into());
+        };
+        if committed.initial_balance > params.max_amount()
+            || committed.spend_amount > params.max_amount()
+            || committed.max_top_up > params.max_amount()
+            || committed
+                .spend_amount
+                .checked_add(committed.max_top_up)
+                .is_none_or(|s| s > params.max_amount())
+        {
+            return fail("committed policy amounts exceed 2^L - 1".into());
+        }
+
+        // Build the endorsement redemption (`0x0001` NoEndorsement if permitted &
+        // offered, otherwise `0x0002` EC-IHAT).
+        let (selected_endorsement_type, redemption_bytes) = if committed.allow_no_endorsement
+            && validated_mod.allows_no_endorsement
+            && parsed.no_endorsement_redeem_challenge.is_some()
+        {
+            (endorsement_type::NO_ENDORSEMENT, Vec::new())
+        } else {
+            let Some(red_chal_bytes) = parsed.ihat_redeem_challenge else {
+                return fail("missing redeem-0002 challenge".into());
+            };
+            let committed_keys: Option<Vec<[u8; 33]>> = committed
+                .accepted_anchor_keys
+                .iter()
+                .map(|b| b.bytes.as_slice().try_into().ok())
+                .collect();
+            let Some(committed_keys) = committed_keys else {
+                return fail("committed accepted_anchor_keys invalid".into());
+            };
+            let committed_epochs: Vec<Vec<u8>> =
+                committed.epochs.iter().map(|e| e.bytes.clone()).collect();
+
+            // Verify every advertised EC-IHAT set for committed epochs matches the
+            // exact ordered committed `anchor-set` (defeating subset/reordering attacks!).
+            let Some(end_idx) =
+                self.find_usable_endorsement(&committed_keys, &committed_epochs)
+            else {
+                return fail("no stored endorsement matches committed policy".into());
+            };
+            let target_epoch = &self.endorsements[end_idx].issuance_epoch;
+            let Some(ihat_set): Option<&ValidatedEcIhatSet> = validated_mod
+                .ec_ihat_sets
+                .iter()
+                .find(|s| &s.issuance_epoch == target_epoch)
+            else {
+                return fail("moderator configuration lacks endorsement epoch".into());
+            };
+            if ihat_set.raw_keys != committed_keys {
+                return fail(
+                    "moderator anchor-set does not match committed ordered anchor-set".into(),
+                );
+            }
+
+            let stored = self.endorsements.swap_remove(end_idx);
+            let Some(anchor_pos) = ihat_set
+                .raw_keys
+                .iter()
+                .position(|k| k == &stored.anchor_key)
+            else {
+                return fail("endorsement anchor missing from anchor-set".into());
+            };
+            let red_challenge = RedemptionChallenge {
+                redemption_context: red_chal_bytes,
+            };
+            let challenge_dig = red_challenge.digest();
+            let Ok(redemption) = ec_ihat::redeem(
+                &ihat_set.anchor_set,
+                anchor_pos,
+                stored.endorsement,
+                &stored.issuance_epoch,
+                EC_IHAT_CTX_RED,
+                &challenge_dig,
+            ) else {
+                return fail("EC-IHAT redeem proof generation failed".into());
+            };
+            (endorsement_type::EC_IHAT, redemption.to_bytes())
+        };
+
+        // Create single EC-ACT IssuanceRequest (`draft-jms-mole-protocols-01` §5.2.2).
+        let Ok((issuance_state, issue_req_msg)) = ec_act::issue_request(&params) else {
+            return fail("EC-ACT issue_request failed".into());
+        };
+        let Ok(issuance_req_bytes) = (EcActIssuanceRequest {
+            truncated_key_id: act_key.truncated_key_id,
+            credential_context: act_key.credential_context.clone(),
+            request: issue_req_msg,
+        })
+        .to_bytes() else {
+            return fail("failed to encode EcActIssuanceRequest".into());
+        };
+        let Ok(authorization_header) = (MoleAuthorization::RedeemAndIssue {
+            endorsement_type: selected_endorsement_type,
+            redemption: redemption_bytes,
+            credential_type: credential_type::EC_ACT,
+            credential_request: issuance_req_bytes,
+        })
+        .to_header_value() else {
+            return fail("failed to format Authorization header".into());
+        };
+
+        let redeem_id = self.alloc_id();
+        self.redeems.insert(
+            redeem_id,
+            PendingRedeem {
+                moderator_origin: canon_origin,
+                issuance_uri: validated_mod.issuance_uri.clone(),
+                credential_context: act_key.credential_context.clone(),
+                ctx_cred: act_key.ctx_cred.clone(),
+                balance_width: act_key.balance_width,
+                expected_initial_balance: committed.initial_balance,
+                public_key: act_key.public_key.clone(),
+                key_id: act_key.key_id,
+                params,
+                issuance_state,
+            },
+        );
 
         RedeemBegin {
             ok: true,
             error: String::new(),
-            authorization_header: MoleAuthorization::CredentialRequest(request.to_bytes())
-                .to_header_value(),
+            redeem_id,
+            issuance_uri: validated_mod.issuance_uri,
+            authorization_header,
         }
     }
 
-    fn redeem_finish(&mut self, mole_credential_header: &str) -> RedeemFinish {
-        let fail = |error: String| RedeemFinish { ok: false, error, pool_size: 0 };
+    pub fn redeem_finish(
+        &mut self,
+        redeem_id: u64,
+        mole_credential_header: &str,
+    ) -> RedeemFinish {
+        let fail = |error: String| RedeemFinish {
+            ok: false,
+            error,
+            pool_size: 0,
+            balance: 0,
+        };
 
-        let Some(redeem) = self.redeem.take() else {
-            return fail("no redemption in progress".into());
+        let Some(redeem) = self.redeems.remove(&redeem_id) else {
+            return fail("unknown or completed redeem_id".into());
         };
         let response_bytes = match MoleCredential::parse(mole_credential_header) {
-            Ok(MoleCredential::Response(bytes)) => bytes,
-            Ok(MoleCredential::Update(_)) => {
-                return fail("expected a response parameter, got update".into())
-            }
-            Err(e) => return fail(format!("Mole-Credential: {e}")),
+            Ok(MoleCredential::Response {
+                credential_type: credential_type::EC_ACT,
+                response,
+            }) => response,
+            _ => return fail("expected Mole-Credential: response-0001".into()),
         };
-        let credential_response = match CredentialResponse::from_bytes(&response_bytes) {
-            Ok(r) => r,
-            Err(e) => return fail(format!("malformed CredentialResponse: {e}")),
+        let Ok(issuance_resp) = EcActIssuanceResponse::from_bytes(&redeem.params, &response_bytes)
+        else {
+            return fail("malformed EcActIssuanceResponse".into());
         };
-        if credential_response.credential_type != credential_type::ACT {
-            return fail("moderator issued an unknown credential type".into());
-        }
-        let issuance_response =
-            match ActIssuanceResponse::from_bytes(&credential_response.issuance_response) {
-                Ok(r) => r,
-                Err(e) => return fail(format!("malformed ActIssuanceResponse: {e}")),
-            };
-        if issuance_response.responses.len() != redeem.pre_issuances.len() {
-            return fail("moderator answered with the wrong batch size".into());
+
+        // Pin `initial_balance` against `CommittedPolicy` to close the per-user
+        // initial-balance tagging side channel!
+        if issuance_resp.response.balance() != redeem.expected_initial_balance {
+            return fail(format!(
+                "issued balance {} does not match committed initial_balance {}",
+                issuance_resp.response.balance(),
+                redeem.expected_initial_balance
+            ));
         }
 
-        // Finalize each response into a pool Credential: both sides derive
-        // the shared request context scalar.
-        let ctx = request_context_scalar(&redeem.policy_context, &redeem.endorsement_context);
-        let mut pool = VecDeque::with_capacity(redeem.pre_issuances.len());
-        for ((pre_issuance, issuance_request), response_bytes) in redeem
-            .pre_issuances
-            .into_iter()
-            .zip(&redeem.issuance_requests)
-            .zip(&issuance_response.responses)
-        {
-            let act_response = match ActIssuanceResponseMsg::from_wire(response_bytes) {
-                Ok(r) => r,
-                Err(e) => return fail(format!("malformed ACT response: {e:?}")),
-            };
-            let token = match pre_issuance.to_credit_token(
-                &redeem.act_params,
-                &redeem.act_public_key,
-                issuance_request,
-                &act_response,
-                ctx.clone(),
-            ) {
-                Ok(t) => t,
-                Err(e) => return fail(format!("credential finalization failed: {e:?}")),
-            };
-            pool.push_back(StoredCredential {
-                token,
-                act_public_key: redeem.act_public_key.clone(),
-                act_params: redeem.act_params.clone(),
-            });
-        }
+        let Ok(credential) = ec_act::finalize_issue(
+            &redeem.params,
+            &redeem.public_key,
+            &redeem.ctx_cred,
+            redeem.issuance_state,
+            &issuance_resp.response,
+        ) else {
+            return fail("EC-ACT finalize_issue failed".into());
+        };
 
+        let key = PoolKey {
+            moderator_origin: redeem.moderator_origin.clone(),
+            credential_context: redeem.credential_context.clone(),
+        };
+        let pool = self.pools.entry(key).or_default();
+        pool.push_back(StoredCredential {
+            credential,
+            public_key: redeem.public_key,
+            key_id: redeem.key_id,
+            balance_width: redeem.balance_width,
+            ctx_cred: redeem.ctx_cred,
+            issuance_uri: redeem.issuance_uri,
+        });
         let pool_size = pool.len();
-        self.pools.insert(redeem.policy_context, pool);
-        RedeemFinish { ok: true, error: String::new(), pool_size }
+        let balance = self.balance(&redeem.moderator_origin, &redeem.credential_context);
+
+        RedeemFinish {
+            ok: true,
+            error: String::new(),
+            pool_size,
+            balance,
+        }
     }
 
-    fn present_begin(
+    pub fn redeem_abort(&mut self, redeem_id: u64) {
+        self.redeems.remove(&redeem_id);
+    }
+
+    pub fn present_begin(
         &mut self,
+        moderator_origin: &str,
+        resource_url: &str,
         www_authenticate: &Vec<String>,
         commitment: &ModeratorCommitment,
+        _now_unix_secs: u64,
     ) -> PresentBegin {
         let fail = |error: String| PresentBegin {
             ok: false,
@@ -873,71 +1322,86 @@ impl MoleBrowserClient {
         if !commitment.found {
             return fail("moderator is not enrolled in the key-commitment registry".into());
         }
-
-        let (credential_challenge, act_challenge, _moderator_challenge) =
-            match parse_moderator_challenges(www_authenticate) {
-                Ok(c) => c,
-                Err(e) => return fail(e),
-            };
-
-        // The challenged amounts must be the policy's committed constants: a
-        // per-Client charge/topup would partition the anonymity set.
+        let Ok(canon_origin) = canonicalize_origin(moderator_origin) else {
+            return fail("moderator origin must be https".into());
+        };
+        let parsed = match parse_moderator_challenges(www_authenticate) {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
         let Some(committed) = commitment
             .policies
             .iter()
-            .find(|p| p.policy_context[..] == act_challenge.policy_context[..])
+            .find(|p| p.credential_context == parsed.act_challenge.credential_context)
         else {
-            return fail("policy is not committed for this moderator".into());
+            return fail("challenged credential_context is not committed".into());
         };
-        if act_challenge.charge != committed.charge || act_challenge.topup != committed.topup {
-            return fail("challenged charge/topup are not the committed amounts".into());
+        if parsed.act_challenge.spend_amount != committed.spend_amount
+            || parsed.act_challenge.max_top_up != committed.max_top_up
+        {
+            return fail("challenged spend_amount/max_top_up differ from committed policy".into());
         }
 
-        // Burn on use: the Credential leaves the pool before the request is
-        // sent, and only its update-derived successor ever returns.
-        let Some(credential) =
-            self.pools.get_mut(&act_challenge.policy_context).and_then(|pool| pool.pop_front())
-        else {
-            return fail("no credential pooled for this policy".into());
+        let key = PoolKey {
+            moderator_origin: canon_origin.clone(),
+            credential_context: parsed.act_challenge.credential_context.clone(),
         };
-
-        let (spend, pre_refund) = match prove_spend(
-            &credential.token,
-            &credential.act_params,
-            u128::from(act_challenge.charge),
-            u128::from(act_challenge.topup),
-            BALANCE_DIGITS,
+        if !self.drain_insufficient_credentials(
+            &key,
+            parsed.act_challenge.spend_amount,
+            parsed.act_challenge.max_top_up,
         ) {
-            Ok(s) => s,
-            Err(e) => {
-                // The drawn Credential stays dropped: a token that cannot
-                // cover the charge would otherwise sit at the pool front
-                // failing every subsequent presentation. Draining it lets
-                // `challenge_eval` steer back into Redeem & Issue.
-                return fail(format!("spend proof failed (balance too low?): {e:?}"));
-            }
+            return fail("no usable credential pooled for this (moderator, context)".into());
+        }
+        let Some(stored) = self.pools.get_mut(&key).and_then(VecDeque::pop_front) else {
+            return fail("no credential pooled".into());
         };
 
-        let presentation = CredentialPresentation {
-            credential_type: credential_type::ACT,
-            presentation_and_update: ActPresentationAndUpdate {
-                challenge_digest: challenge_digest(&credential_challenge.to_bytes()),
-                key_id: key_id(&credential.act_public_key.to_wire()),
-                spend_proof: spend.to_wire().expect("spend proof encodes"),
-            }
-            .to_bytes(),
+        let Ok(params) = ec_act::Params::new(stored.balance_width) else {
+            return fail("invalid stored balance_width".into());
+        };
+        let ctx_spend = challenge_digest(&parsed.raw_act_challenge);
+        let Ok((spend_state, spend_msg)) = ec_act::prove_spend(
+            &params,
+            stored.credential,
+            &stored.ctx_cred,
+            parsed.act_challenge.spend_amount,
+            parsed.act_challenge.max_top_up,
+            &ctx_spend,
+        ) else {
+            return fail("EC-ACT prove_spend failed".into());
         };
 
-        let presentation_id = self.next_presentation_id;
-        self.next_presentation_id += 1;
-        self.in_flight.insert(
+        let pau = EcActPresentationAndUpdate {
+            key_id: stored.key_id,
+            spend: spend_msg,
+        };
+        let presentation_bytes = pau.to_bytes();
+        let recovery_handle = pau.recovery_handle().to_array();
+        let Ok(authorization_header) = (MoleAuthorization::Presentation {
+            credential_type: credential_type::EC_ACT,
+            presentation: presentation_bytes.clone(),
+        })
+        .to_header_value() else {
+            return fail("failed to format presentation Authorization header".into());
+        };
+
+        let presentation_id = self.alloc_id();
+        self.pending_spends.insert(
             presentation_id,
-            InFlightPresentation {
-                pre_refund,
-                spend,
-                act_public_key: credential.act_public_key,
-                act_params: credential.act_params,
-                policy_context: act_challenge.policy_context,
+            PendingSpend {
+                status: PendingSpendStatus::InFlight,
+                moderator_origin: canon_origin,
+                issuance_uri: stored.issuance_uri,
+                resource_url: resource_url.to_string(),
+                credential_context: parsed.act_challenge.credential_context,
+                ctx_cred: stored.ctx_cred,
+                balance_width: stored.balance_width,
+                public_key: stored.public_key,
+                key_id: stored.key_id,
+                spend_state,
+                presentation_bytes,
+                recovery_handle,
             },
         );
 
@@ -945,133 +1409,266 @@ impl MoleBrowserClient {
             ok: true,
             error: String::new(),
             presentation_id,
-            authorization_header: MoleAuthorization::Presentation(presentation.to_bytes())
-                .to_header_value(),
+            authorization_header,
         }
     }
 
-    fn present_finish(
+    pub fn present_finish(
         &mut self,
         presentation_id: u64,
         mole_credential_header: &str,
-    ) -> StatusResult {
-        let Some(in_flight) = self.in_flight.remove(&presentation_id) else {
-            return err_status("unknown presentation");
+        now_unix_secs: u64,
+    ) -> PresentOutcome {
+        let fail = |error: String| PresentOutcome {
+            ok: false,
+            error,
+            held_for_secs: 0,
+            consumed_no_update: false,
         };
-        let update_bytes = match MoleCredential::parse(mole_credential_header) {
-            Ok(MoleCredential::Update(bytes)) => bytes,
-            Ok(MoleCredential::Response(_)) => {
-                return err_status("expected an update parameter, got response")
-            }
-            Err(e) => return err_status(format!("Mole-Credential: {e}")),
-        };
-        let update = match OptionalCredentialUpdate::from_bytes(&update_bytes) {
-            Ok(u) => u,
-            Err(e) => return err_status(format!("malformed update: {e}")),
-        };
-        // An absent update means the Moderator consumed the Credential.
-        let Some(CredentialUpdate { credential_type: ct, update_response }) = update.update else {
-            return ok_status();
-        };
-        if ct != credential_type::ACT {
-            return ok_status();
+
+        if !self.pending_spends.contains_key(&presentation_id) {
+            return fail("unknown presentation_id".into());
         }
-        let act_update = match ActUpdate::from_bytes(&update_response) {
-            Ok(u) => u,
-            Err(e) => return err_status(format!("malformed ActUpdate: {e}")),
+
+        // Per `draft-jms-mole-http-transport-01` §5.3: if no `Mole-Credential`
+        // arrived (e.g., network drop or 5xx before recording), keep `InFlight`
+        // so `recovery-0001` can recover the recorded decision!
+        if mole_credential_header.is_empty() {
+            return fail("missing Mole-Credential; keeping SpendState for recovery".into());
+        }
+
+        let parsed = match MoleCredential::parse(mole_credential_header) {
+            Ok(c) => c,
+            Err(e) => {
+                return fail(format!(
+                    "malformed Mole-Credential ({e}); keeping SpendState for recovery"
+                ));
+            }
         };
-        let refund = match Refund::from_wire(&act_update.refund) {
-            Ok(r) => r,
-            Err(e) => return err_status(format!("malformed Refund: {e:?}")),
-        };
-        let token = match in_flight.pre_refund.to_credit_token(
-            &in_flight.act_params,
-            &in_flight.spend,
-            &refund,
-            &in_flight.act_public_key,
-        ) {
-            Ok(t) => t,
-            Err(e) => return err_status(format!("update finalization failed: {e:?}")),
-        };
-        self.pools.entry(in_flight.policy_context).or_default().push_back(StoredCredential {
-            token,
-            act_public_key: in_flight.act_public_key,
-            act_params: in_flight.act_params,
-        });
-        ok_status()
+
+        match parsed {
+            MoleCredential::HeldForUpdate {
+                credential_type: credential_type::EC_ACT,
+                duration_secs,
+            } => {
+                if let Some(pending) = self.pending_spends.get_mut(&presentation_id) {
+                    pending.status = PendingSpendStatus::Held {
+                        hold_until_unix_secs: now_unix_secs.saturating_add(duration_secs),
+                    };
+                }
+                PresentOutcome {
+                    ok: true,
+                    error: String::new(),
+                    held_for_secs: duration_secs,
+                    consumed_no_update: false,
+                }
+            }
+            MoleCredential::Update {
+                credential_type: credential_type::EC_ACT,
+                update: None,
+            } => {
+                self.pending_spends.remove(&presentation_id);
+                PresentOutcome {
+                    ok: true,
+                    error: String::new(),
+                    held_for_secs: 0,
+                    consumed_no_update: true,
+                }
+            }
+            MoleCredential::Update {
+                credential_type: credential_type::EC_ACT,
+                update: Some(bytes),
+            } => {
+                let Some(pending) = self.pending_spends.remove(&presentation_id) else {
+                    return fail("unknown presentation_id".into());
+                };
+                let Ok(params) = ec_act::Params::new(pending.balance_width) else {
+                    return fail("invalid balance_width".into());
+                };
+                let Ok(act_update) = EcActUpdate::from_bytes(&params, &bytes) else {
+                    // Per `draft-jms-mole-protocols-01` §5.2.3: if refund fails
+                    // verification, discard refund and retain spend state for recovery!
+                    self.pending_spends.insert(presentation_id, pending);
+                    return fail("malformed EcActUpdate; keeping SpendState for recovery".into());
+                };
+                // `finalize_refund` consumes `spend_state` by value; serialize a
+                // zeroizing backup first so an unverified/corrupted header on the
+                // wire cannot destroy a recoverable `PendingSpend`!
+                let spend_backup = pending.spend_state.to_bytes();
+                match ec_act::finalize_refund(
+                    &params,
+                    &pending.public_key,
+                    &pending.ctx_cred,
+                    pending.spend_state,
+                    &act_update.refund,
+                ) {
+                    Ok(credential) => {
+                        let key = PoolKey {
+                            moderator_origin: pending.moderator_origin,
+                            credential_context: pending.credential_context,
+                        };
+                        self.pools.entry(key).or_default().push_back(StoredCredential {
+                            credential,
+                            public_key: pending.public_key,
+                            key_id: pending.key_id,
+                            balance_width: pending.balance_width,
+                            ctx_cred: pending.ctx_cred,
+                            issuance_uri: pending.issuance_uri,
+                        });
+                        PresentOutcome {
+                            ok: true,
+                            error: String::new(),
+                            held_for_secs: 0,
+                            consumed_no_update: false,
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(restored_spend_state) =
+                            ec_act::ClientSpendState::from_bytes(&params, &spend_backup)
+                        {
+                            self.pending_spends.insert(
+                                presentation_id,
+                                PendingSpend {
+                                    status: pending.status,
+                                    moderator_origin: pending.moderator_origin,
+                                    issuance_uri: pending.issuance_uri,
+                                    resource_url: pending.resource_url,
+                                    credential_context: pending.credential_context,
+                                    ctx_cred: pending.ctx_cred,
+                                    balance_width: pending.balance_width,
+                                    public_key: pending.public_key,
+                                    key_id: pending.key_id,
+                                    spend_state: restored_spend_state,
+                                    presentation_bytes: pending.presentation_bytes,
+                                    recovery_handle: pending.recovery_handle,
+                                },
+                            );
+                        }
+                        fail(format!(
+                            "EC-ACT finalize_refund failed ({e}); keeping SpendState for recovery"
+                        ))
+                    }
+                }
+            }
+            _ => fail("unexpected Mole-Credential parameter on presentation".into()),
+        }
     }
 
-    fn present_abort(&mut self, presentation_id: u64) {
-        self.in_flight.remove(&presentation_id);
-    }
-
-    fn pool_size(&self, policy_context: &[u8]) -> usize {
-        self.pools.get(policy_context).map_or(0, |pool| pool.len())
-    }
-
-    fn balance(&self, policy_context: &[u8]) -> u64 {
-        let Some(pool) = self.pools.get(policy_context) else {
+    pub fn pool_size(&self, moderator_origin: &str, credential_context: &[u8]) -> usize {
+        let Ok(canon_origin) = canonicalize_origin(moderator_origin) else {
             return 0;
         };
-        pool.iter()
-            .filter_map(|c| scalar_to_u128(c.token.credits()))
-            .filter_map(|c| u64::try_from(c).ok())
-            .sum()
+        let key = PoolKey {
+            moderator_origin: canon_origin,
+            credential_context: credential_context.to_vec(),
+        };
+        self.pools.get(&key).map_or(0, VecDeque::len)
     }
 
-    fn endorsement_count(&self) -> usize {
+    pub fn balance(&self, moderator_origin: &str, credential_context: &[u8]) -> u64 {
+        let Ok(canon_origin) = canonicalize_origin(moderator_origin) else {
+            return 0;
+        };
+        let key = PoolKey {
+            moderator_origin: canon_origin,
+            credential_context: credential_context.to_vec(),
+        };
+        self.pools
+            .get(&key)
+            .map_or(0, |pool| pool.iter().map(|c| c.credential.balance()).sum())
+    }
+
+    pub fn endorsement_count(&self) -> usize {
         self.endorsements.len()
     }
 
-    /// Serialize the durable state (endorsements + non-empty pools) to a blob.
-    /// Format (version 1, u32-BE length prefixes): `1 || ne || [endorsement…]
-    /// || np || [pool…]`, where each endorsement is
-    /// `varbytes(issued) || varbytes(anchor_key) || varbytes(context)` and each
-    /// pool is `varbytes(policy_ctx) || varbytes(act_dsep) ||
-    /// varbytes(act_pubkey) || nc || [varbytes(token)…]`.
-    fn serialize_state(&self) -> Vec<u8> {
+    pub fn pending_spend_count(&self) -> usize {
+        self.pending_spends.len()
+    }
+
+    /// Serializes durable client state (version 2: `endorsements` + `pools` +
+    /// write-ahead `pending_spends`).
+    pub fn serialize_state(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(1u8);
+        out.push(STATE_FORMAT_VERSION);
+
         put_u32(&mut out, self.endorsements.len() as u32);
         for e in &self.endorsements {
-            put_varbytes(&mut out, &e.issued.to_wire().expect("endorsement serializes"));
+            let end_bytes = e.endorsement.to_bytes();
+            put_varbytes(&mut out, &end_bytes);
+            put_varbytes(&mut out, e.anchor_origin.as_bytes());
             put_varbytes(&mut out, &e.anchor_key);
-            put_varbytes(&mut out, &e.endorsement_context);
+            put_varbytes(&mut out, &e.issuance_epoch);
         }
-        let nonempty: Vec<(&Vec<u8>, &VecDeque<StoredCredential>)> =
+
+        let nonempty: Vec<(&PoolKey, &VecDeque<StoredCredential>)> =
             self.pools.iter().filter(|(_, p)| !p.is_empty()).collect();
         put_u32(&mut out, nonempty.len() as u32);
-        for (policy_context, pool) in nonempty {
-            let front = pool.front().expect("pool is non-empty");
-            put_varbytes(&mut out, policy_context);
-            put_varbytes(&mut out, front.act_params.domain_separator());
-            put_varbytes(&mut out, &front.act_public_key.to_wire());
+        for (key, pool) in nonempty {
+            put_varbytes(&mut out, key.moderator_origin.as_bytes());
+            put_varbytes(&mut out, &key.credential_context);
             put_u32(&mut out, pool.len() as u32);
             for c in pool {
-                put_varbytes(&mut out, &c.token.to_wire());
+                put_varbytes(&mut out, &c.public_key.to_bytes());
+                out.push(c.balance_width);
+                put_varbytes(&mut out, c.issuance_uri.as_bytes());
+                let cred_bytes = c.credential.to_bytes();
+                put_varbytes(&mut out, &cred_bytes);
             }
         }
+
+        let mut pending_list: Vec<(&u64, &PendingSpend)> = self.pending_spends.iter().collect();
+        pending_list.sort_by_key(|&(id, _)| *id);
+        put_u32(&mut out, pending_list.len() as u32);
+        for (_, p) in pending_list {
+            match p.status {
+                PendingSpendStatus::InFlight => {
+                    out.push(0);
+                    put_u64(&mut out, 0);
+                }
+                PendingSpendStatus::Held {
+                    hold_until_unix_secs,
+                } => {
+                    out.push(1);
+                    put_u64(&mut out, hold_until_unix_secs);
+                }
+            }
+            put_varbytes(&mut out, p.moderator_origin.as_bytes());
+            put_varbytes(&mut out, p.issuance_uri.as_bytes());
+            put_varbytes(&mut out, p.resource_url.as_bytes());
+            put_varbytes(&mut out, &p.credential_context);
+            out.push(p.balance_width);
+            put_varbytes(&mut out, &p.public_key.to_bytes());
+            let spend_state_bytes = p.spend_state.to_bytes();
+            put_varbytes(&mut out, &spend_state_bytes);
+            put_varbytes(&mut out, &p.presentation_bytes);
+            out.extend_from_slice(&p.recovery_handle);
+        }
+
         out
     }
 
-    /// Restore state from [`serialize_state`], replacing the current
-    /// endorsements and pools. Returns false (leaving state untouched) if the
-    /// blob is malformed, so a corrupt persisted store cannot wedge the client.
-    fn restore_state(&mut self, bytes: &[u8]) -> bool {
-        match parse_state(bytes) {
-            Some((endorsements, pools)) => {
-                self.endorsements = endorsements;
-                self.pools = pools;
-                true
-            }
-            None => false,
-        }
+    pub fn restore_state(&mut self, bytes: &[u8]) -> bool {
+        let Some((endorsements, pools, pending_spends, next_id)) = parse_state(bytes) else {
+            return false;
+        };
+        self.endorsements = endorsements;
+        self.pools = pools;
+        self.pending_spends = pending_spends;
+        self.next_id = next_id;
+        true
     }
 }
 
-// -- durable-state (de)serialization helpers --
+// ---------------------------------------------------------------------------
+// Durable-State Binary Serialization Helpers
+// ---------------------------------------------------------------------------
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
@@ -1080,7 +1677,6 @@ fn put_varbytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// A bounds-checked cursor over a state blob.
 struct StateCursor<'a> {
     buf: &'a [u8],
     pos: usize,
@@ -1088,465 +1684,944 @@ struct StateCursor<'a> {
 
 impl<'a> StateCursor<'a> {
     fn new(buf: &'a [u8]) -> Self {
-        StateCursor { buf, pos: 0 }
+        Self { buf, pos: 0 }
     }
+
     fn u8(&mut self) -> Option<u8> {
         let b = *self.buf.get(self.pos)?;
         self.pos += 1;
         Some(b)
     }
+
     fn u32(&mut self) -> Option<usize> {
         let end = self.pos.checked_add(4)?;
         let raw = self.buf.get(self.pos..end)?;
         self.pos = end;
-        Some(u32::from_be_bytes(raw.try_into().unwrap()) as usize)
+        Some(u32::from_be_bytes(raw.try_into().ok()?) as usize)
     }
+
+    fn u64(&mut self) -> Option<u64> {
+        let end = self.pos.checked_add(8)?;
+        let raw = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        Some(u64::from_be_bytes(raw.try_into().ok()?))
+    }
+
+    fn fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let end = self.pos.checked_add(N)?;
+        let raw = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        raw.try_into().ok()
+    }
+
     fn varbytes(&mut self) -> Option<&'a [u8]> {
         let len = self.u32()?;
         let end = self.pos.checked_add(len)?;
-        let slice = self.buf.get(self.pos..end)?;
+        let s = self.buf.get(self.pos..end)?;
         self.pos = end;
-        Some(slice)
+        Some(s)
     }
+
+    fn varstr(&mut self) -> Option<String> {
+        std::str::from_utf8(self.varbytes()?).ok().map(str::to_owned)
+    }
+
     fn is_empty(&self) -> bool {
         self.pos == self.buf.len()
     }
 }
 
-type RestoredState = (Vec<StoredEndorsement>, HashMap<Vec<u8>, VecDeque<StoredCredential>>);
+type ParsedClientState = (
+    Vec<StoredEndorsement>,
+    HashMap<PoolKey, VecDeque<StoredCredential>>,
+    HashMap<u64, PendingSpend>,
+    u64,
+);
 
-/// Parse a state blob, or `None` on any malformation (including trailing
-/// bytes).
-fn parse_state(bytes: &[u8]) -> Option<RestoredState> {
+fn parse_state(bytes: &[u8]) -> Option<ParsedClientState> {
     let mut cur = StateCursor::new(bytes);
-    if cur.u8()? != 1 {
+    if cur.u8()? != STATE_FORMAT_VERSION {
         return None;
     }
+
     let ne = cur.u32()?;
-    let mut endorsements = Vec::new();
-    for _ in 0..ne {
-        let issued = IssuedEndorsement::from_wire(cur.varbytes()?).ok()?;
-        let anchor_key = cur.varbytes()?.to_vec();
-        let endorsement_context = cur.varbytes()?.to_vec();
-        endorsements.push(StoredEndorsement { issued, anchor_key, endorsement_context });
+    if ne > 4096 {
+        return None;
     }
+    let mut endorsements = Vec::with_capacity(ne);
+    for _ in 0..ne {
+        let endorsement = ec_ihat::Endorsement::from_bytes(cur.varbytes()?).ok()?;
+        let anchor_origin = cur.varstr()?;
+        let anchor_key: [u8; 33] = cur.varbytes()?.try_into().ok()?;
+        let _: ec_ihat::PublicKey = ec_ihat::PublicKey::from_bytes(&anchor_key).ok()?;
+        let issuance_epoch = cur.varbytes()?.to_vec();
+        endorsements.push(StoredEndorsement {
+            endorsement,
+            anchor_origin,
+            anchor_key,
+            issuance_epoch,
+        });
+    }
+
     let np = cur.u32()?;
-    let mut pools = HashMap::new();
+    if np > 1024 {
+        return None;
+    }
+    let mut pools = HashMap::with_capacity(np);
     for _ in 0..np {
-        let policy_context = cur.varbytes()?.to_vec();
-        let domain_separator = cur.varbytes()?.to_vec();
-        let act_public_key = ActPublicKey::from_wire(cur.varbytes()?).ok()?;
-        let act_params = ActParams::from_domain_separator(&domain_separator);
+        let moderator_origin = cur.varstr()?;
+        let credential_context = cur.varbytes()?.to_vec();
         let nc = cur.u32()?;
-        let mut pool = VecDeque::with_capacity(nc.min(1024));
+        if nc > 1024 {
+            return None;
+        }
+        let mut pool = VecDeque::with_capacity(nc);
         for _ in 0..nc {
-            let token = CreditToken::from_wire(cur.varbytes()?).ok()?;
+            let pk_bytes: [u8; 33] = cur.varbytes()?.try_into().ok()?;
+            let public_key = ec_act::PublicKey::from_bytes(&pk_bytes).ok()?;
+            let balance_width = cur.u8()?;
+            let params = ec_act::Params::new(balance_width).ok()?;
+            let ctx_cred = derive_ctx_cred(&credential_context, balance_width).ok()?;
+            let issuance_uri = cur.varstr()?;
+            let credential = ec_act::Credential::from_bytes(&params, cur.varbytes()?).ok()?;
+            let key_id = compute_ec_act_key_id(&public_key);
             pool.push_back(StoredCredential {
-                token,
-                act_public_key: act_public_key.clone(),
-                act_params: act_params.clone(),
+                credential,
+                public_key,
+                key_id,
+                balance_width,
+                ctx_cred,
+                issuance_uri,
             });
         }
-        pools.insert(policy_context, pool);
+        pools.insert(
+            PoolKey {
+                moderator_origin,
+                credential_context,
+            },
+            pool,
+        );
     }
+
+    let n_pending = cur.u32()?;
+    if n_pending > 1024 {
+        return None;
+    }
+    let mut pending_spends = HashMap::with_capacity(n_pending);
+    let mut next_id = 1u64;
+    for _ in 0..n_pending {
+        let status_tag = cur.u8()?;
+        let hold_until = cur.u64()?;
+        let status = match status_tag {
+            0 => PendingSpendStatus::InFlight,
+            1 => PendingSpendStatus::Held {
+                hold_until_unix_secs: hold_until,
+            },
+            _ => return None,
+        };
+        let moderator_origin = cur.varstr()?;
+        let issuance_uri = cur.varstr()?;
+        let resource_url = cur.varstr()?;
+        let credential_context = cur.varbytes()?.to_vec();
+        let balance_width = cur.u8()?;
+        let params = ec_act::Params::new(balance_width).ok()?;
+        let ctx_cred = derive_ctx_cred(&credential_context, balance_width).ok()?;
+        let pk_bytes: [u8; 33] = cur.varbytes()?.try_into().ok()?;
+        let public_key = ec_act::PublicKey::from_bytes(&pk_bytes).ok()?;
+        let key_id = compute_ec_act_key_id(&public_key);
+        let spend_state = ec_act::ClientSpendState::from_bytes(&params, cur.varbytes()?).ok()?;
+        let presentation_bytes = cur.varbytes()?.to_vec();
+        let recovery_handle = cur.fixed::<96>()?;
+
+        let id = next_id;
+        next_id += 1;
+        pending_spends.insert(
+            id,
+            PendingSpend {
+                status,
+                moderator_origin,
+                issuance_uri,
+                resource_url,
+                credential_context,
+                ctx_cred,
+                balance_width,
+                public_key,
+                key_id,
+                spend_state,
+                presentation_bytes,
+                recovery_handle,
+            },
+        );
+    }
+
     if !cur.is_empty() {
         return None;
     }
-    Some((endorsements, pools))
+    Some((endorsements, pools, pending_spends, next_id))
 }
 
 // ---------------------------------------------------------------------------
-// Test servers: in-process ports of mole-anchor / mole-moderator
+// In-Process Spec-Compliant Test Servers (`TestMoleAnchor`, `TestMoleModerator`)
 // ---------------------------------------------------------------------------
 
-fn http(status: u16, body: &[u8]) -> TestHttpResponse {
+fn test_http(status: u16, body: &[u8]) -> TestHttpResponse {
     TestHttpResponse {
         status,
+        content_type: "text/plain".into(),
         www_authenticate: Vec::new(),
         mole_credential: String::new(),
+        cache_control: String::new(),
         body: body.to_vec(),
     }
 }
 
-/// The Anchor's grant handler, minus HTTP: sessions keyed the same way as
-/// mole-anchor, no per-user limits (tests exercise the protocol, not quota).
+/// Spec-compliant in-process EC-IHAT Anchor (`draft-jms-mole-protocols-01` §4.4).
 pub struct TestMoleAnchor {
-    key: AnchorSecretKey,
-    endorsement_context: Vec<u8>,
-    sessions: HashMap<Vec<u8>, AnchorNeedsProofRequest>,
+    origin: String,
+    key: ec_ihat::SecretKey,
+    issuance_epoch: Vec<u8>,
+    open_sessions: HashMap<[u8; 32], Vec<ec_ihat::AnchorState>>,
+    consumed_sessions: HashSet<[u8; 32]>,
 }
 
-fn new_test_anchor(endorsement_context: &[u8]) -> Box<TestMoleAnchor> {
+pub fn new_test_anchor(origin: &str, issuance_epoch: &[u8]) -> Box<TestMoleAnchor> {
+    let mut seed = Zeroizing::new([0u8; 48]);
+    fill_random(&mut *seed).expect("RNG succeeds");
+    let key = ec_ihat::SecretKey::from_seed(&seed).expect("Anchor key derives");
+    let (canon_origin, _) =
+        validate_https_endpoint_uri(origin).unwrap_or_else(|_| ("https://anchor.example".into(), "/".into()));
     Box::new(TestMoleAnchor {
-        key: AnchorSecretKey::random(),
-        endorsement_context: endorsement_context.to_vec(),
-        sessions: HashMap::new(),
+        origin: canon_origin,
+        key,
+        issuance_epoch: issuance_epoch.to_vec(),
+        open_sessions: HashMap::new(),
+        consumed_sessions: HashSet::new(),
     })
 }
 
 impl TestMoleAnchor {
-    fn anchor_public_key(&self) -> Vec<u8> {
+    pub fn anchor_public_key(&self) -> Vec<u8> {
         self.key.public_key().to_bytes().to_vec()
     }
 
-    fn anchor_commitment(&self) -> AnchorCommitment {
+    pub fn grant_uri(&self) -> String {
+        format!("{}/mole/grant", self.origin)
+    }
+
+    pub fn anchor_commitment(&self) -> AnchorCommitment {
         AnchorCommitment {
             found: true,
-            keys: vec![Blob { bytes: self.anchor_public_key() }],
-            epochs: vec![Blob { bytes: self.endorsement_context.clone() }],
-        }
-    }
-
-    fn anchor_directory_json(&self) -> String {
-        let directory = AnchorDirectory {
-            endorsement_configs: vec![AnchorEndorsementConfig {
-                endorsement_type: endorsement_type::IHAT,
-                public_key: b64_encode(&self.anchor_public_key()),
-                endorsement_context: b64_encode(&self.endorsement_context),
-                endorse_endpoint: "/mole/endorse".to_string(),
+            grant_uri: self.grant_uri(),
+            keys: vec![Blob {
+                bytes: self.anchor_public_key(),
             }],
-        };
-        serde_json::to_string(&directory).expect("directory serializes")
-    }
-
-    fn handle_endorse(&mut self, body: &[u8]) -> TestHttpResponse {
-        let Ok(request) = EndorsementRequest::from_bytes(body) else {
-            return http(400, b"malformed EndorsementRequest");
-        };
-        if request.endorsement_type != endorsement_type::IHAT {
-            return http(404, b"unknown endorsement type");
+            epochs: vec![Blob {
+                bytes: self.issuance_epoch.clone(),
+            }],
         }
-        let Ok(grant) = IhatGrantRequest::from_bytes(&request.body) else {
-            return http(400, b"malformed grant body");
+    }
+
+    pub fn anchor_config_json(&self) -> String {
+        let cfg = AnchorConfiguration {
+            grant_uri: self.grant_uri(),
+            endorsement_type: endorsement_type::EC_IHAT,
+            ciphersuite: CIPHERSUITE_P256_SHA256.into(),
+            anchor_key: b64_encode(&self.anchor_public_key()),
+            issuance_epoch: b64_encode(&self.issuance_epoch),
+        };
+        serde_json::to_string(&cfg).expect("AnchorConfiguration serializes")
+    }
+
+    pub fn handle_grant(&mut self, content_type: &str, body: &[u8]) -> TestHttpResponse {
+        match parse_endorsement_request_media_type(content_type) {
+            Ok(t) if t == endorsement_type::EC_IHAT => {}
+            _ => return test_http(415, b"invalid Content-Type"),
+        }
+        let Ok(post) = EcIhatGrantPost::from_bytes(body) else {
+            return test_http(400, b"malformed grant body");
         };
 
-        let response_body = match grant {
-            IhatGrantRequest::Step1 { signature_request } => {
-                let Ok(sig_request) = SignatureRequest::from_wire(&signature_request) else {
-                    return http(400, b"malformed SignatureRequest");
-                };
-                if sig_request.endorsement_context != self.endorsement_context {
-                    return http(400, b"wrong endorsement context");
+        let resp_bytes = match post {
+            EcIhatGrantPost::Request(req) => {
+                let n = usize::from(req.count.min(64));
+                let mut states = Vec::with_capacity(n);
+                let mut commitments = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let Ok((st, com)) = ec_ihat::commit(&self.issuance_epoch) else {
+                        return test_http(500, b"commit failed");
+                    };
+                    states.push(st);
+                    commitments.push(com);
                 }
-                let (signature, pending) = sig_request.sign(&self.key);
-                let mut session_id = vec![0u8; 16];
-                fill_random(&mut session_id);
-                self.sessions.insert(session_id.clone(), pending);
-                IhatGrantResponse::Step1 { session_id, signature: signature.to_wire() }
+                let mut session_id = [0u8; 32];
+                fill_random(&mut session_id).expect("RNG succeeds");
+                self.open_sessions.insert(session_id, states);
+                GrantCommitments {
+                    session_id,
+                    commitments,
+                }
+                .to_bytes()
+                .expect("GrantCommitments encodes")
             }
-            IhatGrantRequest::Step2 { session_id, proof_request } => {
-                let Some(pending) = self.sessions.remove(&session_id) else {
-                    return http(400, b"unknown or spent session");
+            EcIhatGrantPost::Challenges(chal) => {
+                // Single-use claim BEFORE reading states (`draft-jms-mole-protocols-01` §4.4.2 step 2)!
+                if self.consumed_sessions.contains(&chal.session_id) {
+                    return test_http(400, b"replayed session_id");
+                }
+                let Some(states) = self.open_sessions.remove(&chal.session_id) else {
+                    return test_http(400, b"unknown session_id");
                 };
-                let Ok(proof_request) = ProofRequest::from_wire(&proof_request) else {
-                    return http(400, b"malformed ProofRequest");
-                };
-                let proof = pending.prove(&proof_request);
-                IhatGrantResponse::Step2 { proof: proof.to_wire() }
+                self.consumed_sessions.insert(chal.session_id);
+                if states.len() != chal.challenges.len() {
+                    return test_http(400, b"challenge count mismatch");
+                }
+                let mut responses = Vec::with_capacity(states.len());
+                for (state, challenge_msg) in states.into_iter().zip(&chal.challenges) {
+                    let Ok(resp) = ec_ihat::respond(&self.key, state, challenge_msg) else {
+                        return test_http(400, b"EC-IHAT respond rejected challenge");
+                    };
+                    responses.push(resp);
+                }
+                GrantResponses { responses }
+                    .to_bytes()
+                    .expect("GrantResponses encodes")
             }
         };
 
-        let response = EndorsementResponse {
-            endorsement_type: endorsement_type::IHAT,
-            body: response_body.to_bytes(),
-        };
-        http(200, &response.to_bytes())
+        TestHttpResponse {
+            status: 200,
+            content_type: format_endorsement_response_media_type(endorsement_type::EC_IHAT)
+                .expect("media type formats"),
+            www_authenticate: Vec::new(),
+            mole_credential: String::new(),
+            cache_control: "no-store".into(),
+            body: resp_bytes,
+        }
     }
 }
 
-/// The Moderator's resource handler, minus HTTP: the same challenge,
-/// Redeem & Issue, and Presentation-and-Update logic as mole-moderator,
-/// including validate-everything-before-the-nullifier and uniform 403s.
-pub struct TestMoleModerator {
-    policy_context: Vec<u8>,
-    accepted_anchor_keys: Vec<[u8; 33]>,
-    endorsement_context: Vec<u8>,
-    initial_credits: u64,
-    issuance_batch: u64,
-    charge: u64,
-    refund: u64,
-    act_domain_separator: Vec<u8>,
-    accepted: Vec<IhatKey>,
-    act_params: ActParams,
-    act_key: ActPrivateKey,
-    act_key_id: [u8; 32],
-    act_ctx: ActScalar,
-    seen_endorsement_nullifiers: std::collections::HashSet<Vec<u8>>,
-    seen_spend_nullifiers: std::collections::HashSet<[u8; 32]>,
+enum RecordedSpendDecision {
+    Held {
+        hold_until: u64,
+        raw_spend: Vec<u8>,
+    },
+    Refund(Vec<u8>),
+    NoUpdate,
 }
 
-fn new_test_moderator(
+struct RecordedSpend {
+    presentation_sha256: [u8; 32],
+    recorded_at: u64,
+    decision: RecordedSpendDecision,
+}
+
+/// Spec-compliant in-process EC-ACT Moderator (`draft-jms-mole-protocols-01` §5.2
+/// & `draft-jms-mole-http-transport-01`).
+pub struct TestMoleModerator {
+    origin: String,
+    accepted_anchor_keys: Vec<[u8; 33]>,
+    anchor_set: Vec<ec_ihat::PublicKey>,
+    issuance_epoch: Vec<u8>,
+    credential_context: Vec<u8>,
+    ctx_cred: Vec<u8>,
+    balance_width: u8,
+    initial_balance: u64,
+    spend_amount: u64,
+    max_top_up: u64,
+    refund_amount: u64,
+    result_retention_secs: u64,
+    hold_duration_secs: u64,
+    withhold_update: bool,
+    allow_no_endorsement: bool,
+    clock_secs: u64,
+    params: ec_act::Params,
+    secret_key: ec_act::SecretKey,
+    key_id: [u8; 32],
+    redemption_challenge: [u8; 32],
+    seen_endorsement_nullifiers: HashSet<[u8; 32]>,
+    recorded_spends: HashMap<[u8; 32], RecordedSpend>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn new_test_moderator(
+    origin: &str,
     accepted_anchor_keys: &Vec<Blob>,
-    endorsement_context: &[u8],
-    policy_context: &[u8],
-    initial_credits: u64,
-    issuance_batch: u64,
-    charge: u64,
-    refund: u64,
+    issuance_epoch: &[u8],
+    credential_context: &[u8],
+    balance_width: u8,
+    initial_balance: u64,
+    spend_amount: u64,
+    max_top_up: u64,
+    refund_amount: u64,
 ) -> Box<TestMoleModerator> {
-    let keys: Vec<[u8; 33]> = accepted_anchor_keys
-        .iter()
-        .map(|k| {
-            let mut key = [0u8; 33];
-            key.copy_from_slice(&k.bytes);
-            key
-        })
-        .collect();
-    let accepted: Vec<IhatKey> =
-        keys.iter().map(|k| decode_anchor_key(k).expect("accepted anchor key decodes")).collect();
-    let act_domain_separator = b"MoLE-components-test:act:v1".to_vec();
-    let act_params = ActParams::from_domain_separator(&act_domain_separator);
-    let act_key = ActPrivateKey::random();
-    let act_key_id = key_id(&act_key.public().to_wire());
-    let act_ctx = request_context_scalar(policy_context, endorsement_context);
+    let bw = if balance_width == 0 {
+        DEFAULT_BALANCE_WIDTH
+    } else {
+        balance_width
+    };
+    let params = ec_act::Params::new(bw).expect("valid balance_width");
+    let ctx_cred = derive_ctx_cred(credential_context, bw).expect("valid credential_context");
+    let mut seed = Zeroizing::new([0u8; 48]);
+    fill_random(&mut *seed).expect("RNG succeeds");
+    let secret_key = ec_act::SecretKey::from_seed(&seed).expect("Moderator key derives");
+    let key_id = compute_ec_act_key_id(&secret_key.public_key());
+
+    let mut raw_keys = Vec::with_capacity(accepted_anchor_keys.len());
+    let mut anchor_set = Vec::with_capacity(accepted_anchor_keys.len());
+    for b in accepted_anchor_keys {
+        let arr: [u8; 33] = b.bytes.as_slice().try_into().expect("33-byte anchor key");
+        let pk = ec_ihat::PublicKey::from_bytes(&arr).expect("valid anchor P-256 point");
+        raw_keys.push(arr);
+        anchor_set.push(pk);
+    }
+
+    let mut redemption_challenge = [0u8; 32];
+    fill_random(&mut redemption_challenge).expect("RNG succeeds");
+    let (canon_origin, _) = validate_https_endpoint_uri(origin)
+        .unwrap_or_else(|_| ("https://moderator.example".into(), "/".into()));
+
     Box::new(TestMoleModerator {
-        policy_context: policy_context.to_vec(),
-        accepted_anchor_keys: keys,
-        endorsement_context: endorsement_context.to_vec(),
-        initial_credits,
-        issuance_batch,
-        charge,
-        refund,
-        act_domain_separator,
-        accepted,
-        act_params,
-        act_key,
-        act_key_id,
-        act_ctx,
-        seen_endorsement_nullifiers: std::collections::HashSet::new(),
-        seen_spend_nullifiers: std::collections::HashSet::new(),
+        origin: canon_origin,
+        accepted_anchor_keys: raw_keys,
+        anchor_set,
+        issuance_epoch: issuance_epoch.to_vec(),
+        credential_context: credential_context.to_vec(),
+        ctx_cred,
+        balance_width: bw,
+        initial_balance,
+        spend_amount,
+        max_top_up,
+        refund_amount,
+        result_retention_secs: 300,
+        hold_duration_secs: 0,
+        withhold_update: false,
+        allow_no_endorsement: false,
+        clock_secs: 1_000,
+        params,
+        secret_key,
+        key_id,
+        redemption_challenge,
+        seen_endorsement_nullifiers: HashSet::new(),
+        recorded_spends: HashMap::new(),
     })
 }
 
 impl TestMoleModerator {
-    fn moderator_challenge(&self) -> ModeratorChallenge {
-        ModeratorChallenge {
-            endorsement_type: endorsement_type::IHAT,
-            challenge: IhatChallenge { keys: self.accepted_anchor_keys.clone() }.to_bytes(),
+    pub fn set_hold_duration_secs(&mut self, hold_secs: u64) {
+        self.hold_duration_secs = hold_secs;
+    }
+
+    pub fn set_withhold_update(&mut self, withhold: bool) {
+        self.withhold_update = withhold;
+    }
+
+    pub fn set_allow_no_endorsement(&mut self, allow: bool) {
+        self.allow_no_endorsement = allow;
+    }
+
+    pub fn advance_clock_secs(&mut self, delta_secs: u64) {
+        self.clock_secs = self.clock_secs.saturating_add(delta_secs);
+    }
+
+    pub fn issuance_uri(&self) -> String {
+        format!("{}/mole/issue", self.origin)
+    }
+
+    fn ec_act_challenge(&self) -> EcActChallenge {
+        EcActChallenge {
+            spend_amount: self.spend_amount,
+            max_top_up: self.max_top_up,
+            credential_context: self.credential_context.clone(),
+            request_context: Vec::new(),
         }
     }
 
-    fn credential_challenge(&self) -> CredentialChallenge {
-        CredentialChallenge {
-            credential_type: credential_type::ACT,
-            challenge: ActChallenge {
-                policy_context: self.policy_context.clone(),
-                charge: self.charge,
-                topup: 0,
-            }
-            .to_bytes(),
-        }
-    }
-
-    fn moderator_commitment(&self) -> ModeratorCommitment {
+    pub fn moderator_commitment(&self) -> ModeratorCommitment {
         ModeratorCommitment {
             found: true,
             policies: vec![CommittedPolicy {
-                policy_context: self.policy_context.clone(),
-                act_public_key: self.act_key.public().to_wire(),
-                act_domain_separator: self.act_domain_separator.clone(),
+                credential_context: self.credential_context.clone(),
+                credential_key: self.secret_key.public_key().to_bytes().to_vec(),
+                balance_width: self.balance_width,
+                initial_balance: self.initial_balance,
+                spend_amount: self.spend_amount,
+                max_top_up: self.max_top_up,
                 accepted_anchor_keys: self
                     .accepted_anchor_keys
                     .iter()
                     .map(|k| Blob { bytes: k.to_vec() })
                     .collect(),
-                epochs: vec![Blob { bytes: self.endorsement_context.clone() }],
-                charge: self.charge,
-                topup: 0,
+                epochs: vec![Blob {
+                    bytes: self.issuance_epoch.clone(),
+                }],
+                allow_no_endorsement: self.allow_no_endorsement,
+                issuance_uri: self.issuance_uri(),
             }],
         }
     }
 
-    fn moderator_directory_json(&self) -> String {
-        let directory = ModeratorDirectory {
-            policies: vec![ModeratorPolicy {
-                policy_context: b64_encode(&self.policy_context),
-                credential_type: credential_type::ACT,
-                act_public_key: b64_encode(&self.act_key.public().to_wire()),
-                act_domain_separator: b64_encode(&self.act_domain_separator),
-                act_balance_digits: BALANCE_DIGITS as u64,
-                initial_credits: self.initial_credits,
-                issuance_batch: self.issuance_batch,
-                charge: self.charge,
-                endorsement_type: endorsement_type::IHAT,
-                accepted_anchor_keys: self
+    pub fn moderator_config_json(&self) -> String {
+        let mut endorsements = Vec::new();
+        if !self.accepted_anchor_keys.is_empty() {
+            let ihat = EcIhatEndorsementConfig {
+                endorsement_type: endorsement_type::EC_IHAT,
+                ciphersuite: CIPHERSUITE_P256_SHA256.into(),
+                issuance_epoch: b64_encode(&self.issuance_epoch),
+                anchor_set: self
                     .accepted_anchor_keys
                     .iter()
                     .map(|k| b64_encode(k))
                     .collect(),
-                endorsement_context: b64_encode(&self.endorsement_context),
-            }],
+            };
+            endorsements.push(serde_json::to_value(ihat).unwrap());
+        }
+        if self.allow_no_endorsement {
+            let no_end = NoEndorsementConfig {
+                endorsement_type: endorsement_type::NO_ENDORSEMENT,
+            };
+            endorsements.push(serde_json::to_value(no_end).unwrap());
+        }
+        let act_key = EcActKeyConfig {
+            credential_type: credential_type::EC_ACT,
+            credential_key: b64_encode(&self.secret_key.public_key().to_bytes()),
+            ciphersuite: CIPHERSUITE_P256_SHA256.into(),
+            balance_width: self.balance_width,
+            credential_context: b64_encode(&self.credential_context),
+            result_retention: self.result_retention_secs,
         };
-        serde_json::to_string(&directory).expect("directory serializes")
+        let cfg = ModeratorConfiguration {
+            issuance_uri: self.issuance_uri(),
+            endorsements,
+            credential_keys: vec![serde_json::to_value(act_key).unwrap()],
+        };
+        serde_json::to_string(&cfg).expect("ModeratorConfiguration serializes")
     }
 
-    /// 401 with the two `Mole` challenges.
-    fn challenge_response(&self, mole_credential: String) -> TestHttpResponse {
-        let credential = MoleChallenge {
-            challenge: self.credential_challenge().to_bytes(),
-            realm: Some("moderator".into()),
-        };
-        let endorsement = MoleChallenge {
-            challenge: self.moderator_challenge().to_bytes(),
-            realm: Some("moderator".into()),
-        };
+    fn challenge_401(&self) -> TestHttpResponse {
+        let mut challenges = vec![MoleChallenge::Credential {
+            credential_type: credential_type::EC_ACT,
+            challenge: self.ec_act_challenge().to_bytes().unwrap(),
+        }];
+        if !self.accepted_anchor_keys.is_empty() || !self.allow_no_endorsement {
+            challenges.push(MoleChallenge::Redeem {
+                endorsement_type: endorsement_type::EC_IHAT,
+                challenge: self.redemption_challenge,
+            });
+        }
+        if self.allow_no_endorsement {
+            challenges.push(MoleChallenge::Redeem {
+                endorsement_type: endorsement_type::NO_ENDORSEMENT,
+                challenge: self.redemption_challenge,
+            });
+        }
         TestHttpResponse {
             status: 401,
-            www_authenticate: vec![credential.to_header_value(), endorsement.to_header_value()],
-            mole_credential,
+            content_type: "text/plain".into(),
+            www_authenticate: vec![format_www_authenticate(&challenges).unwrap()],
+            mole_credential: String::new(),
+            cache_control: "no-store".into(),
             body: b"credential required\n".to_vec(),
         }
     }
 
-    /// 403: understood but rejected; deliberately uniform.
-    fn reject(&self) -> TestHttpResponse {
-        http(403, b"rejected\n")
+    fn finalize_held_decision(&mut self, nullifier: &[u8; 32]) -> Option<MoleCredential> {
+        let record = self.recorded_spends.get(nullifier)?;
+        let raw_spend = match &record.decision {
+            RecordedSpendDecision::Held { raw_spend, .. } => raw_spend.clone(),
+            RecordedSpendDecision::Refund(bytes) => {
+                return Some(MoleCredential::Update {
+                    credential_type: credential_type::EC_ACT,
+                    update: Some(bytes.clone()),
+                });
+            }
+            RecordedSpendDecision::NoUpdate => {
+                return Some(MoleCredential::Update {
+                    credential_type: credential_type::EC_ACT,
+                    update: None,
+                });
+            }
+        };
+
+        let decision = if self.withhold_update {
+            RecordedSpendDecision::NoUpdate
+        } else {
+            let spend_msg = ec_act::SpendMessage::from_bytes(&self.params, &raw_spend).ok()?;
+            let ctx_spend = self.ec_act_challenge().ctx_spend().ok()?;
+            let verified = ec_act::verify_spend(
+                &self.params,
+                &self.secret_key,
+                &self.ctx_cred,
+                &ctx_spend,
+                &spend_msg,
+            )
+            .ok()?;
+            let refund = ec_act::issue_refund(verified, self.refund_amount).ok()?;
+            RecordedSpendDecision::Refund(EcActUpdate { refund }.to_bytes())
+        };
+
+        let cred = match &decision {
+            RecordedSpendDecision::Refund(bytes) => MoleCredential::Update {
+                credential_type: credential_type::EC_ACT,
+                update: Some(bytes.clone()),
+            },
+            RecordedSpendDecision::NoUpdate => MoleCredential::Update {
+                credential_type: credential_type::EC_ACT,
+                update: None,
+            },
+            RecordedSpendDecision::Held { .. } => unreachable!(),
+        };
+        if let Some(rec) = self.recorded_spends.get_mut(nullifier) {
+            rec.decision = decision;
+            rec.recorded_at = self.clock_secs;
+        }
+        Some(cred)
     }
 
-    fn handle_resource(&mut self, authorization_header: &str) -> TestHttpResponse {
+    /// Handles `POST /mole/issue`: Redeem & Issue (`200`), Recovery (`200`/`404`),
+    /// and Signoff (`200`/`404`).
+    pub fn handle_issue(&mut self, authorization_header: &str) -> TestHttpResponse {
         if authorization_header.is_empty() {
-            return self.challenge_response(String::new());
+            return self.challenge_401();
         }
-        match MoleAuthorization::parse(authorization_header) {
-            Err(_) => self.challenge_response(String::new()),
-            Ok(MoleAuthorization::CredentialRequest(bytes)) => self.redeem_and_issue(&bytes),
-            Ok(MoleAuthorization::Presentation(bytes)) => self.present(&bytes),
+        let Ok(auth) = MoleAuthorization::parse(authorization_header) else {
+            return test_http(400, b"malformed Authorization");
+        };
+
+        match auth {
+            MoleAuthorization::RedeemAndIssue {
+                endorsement_type: et,
+                redemption,
+                credential_type: ct,
+                credential_request,
+            } => {
+                if ct != credential_type::EC_ACT {
+                    return test_http(403, b"unsupported credential type");
+                }
+                // Step 1 & 2 (`draft-jms-mole-protocols-01` §5.2.2): check active key
+                // & credential_context and verify IssueRequestMessage BEFORE redemption!
+                let Ok(iss_req) = EcActIssuanceRequest::from_bytes(&self.params, &credential_request)
+                else {
+                    return test_http(400, b"malformed IssuanceRequest");
+                };
+                if iss_req.truncated_key_id != self.key_id[31]
+                    || iss_req.credential_context != self.credential_context
+                {
+                    return test_http(403, b"unknown key or credential_context");
+                }
+                let Ok(verified_req) = ec_act::verify_issue_request(&self.params, &iss_req.request)
+                else {
+                    return test_http(403, b"invalid IssueRequest proof");
+                };
+
+                // Step 3: FinalizeRedeem.
+                let maybe_nf: Option<[u8; 32]> = match et {
+                    endorsement_type::NO_ENDORSEMENT => {
+                        if !self.allow_no_endorsement || !redemption.is_empty() {
+                            return test_http(403, b"NoEndorsement not permitted");
+                        }
+                        None
+                    }
+                    endorsement_type::EC_IHAT => {
+                        let Ok(red) =
+                            ec_ihat::Redemption::from_bytes(&redemption, self.anchor_set.len())
+                        else {
+                            return test_http(403, b"malformed EC-IHAT Redemption");
+                        };
+                        let challenge_dig = sha256(&self.redemption_challenge);
+                        let Ok(nf) = ec_ihat::verify_redemption(
+                            &self.anchor_set,
+                            &red,
+                            &self.issuance_epoch,
+                            EC_IHAT_CTX_RED,
+                            &challenge_dig,
+                        ) else {
+                            return test_http(403, b"EC-IHAT verification failed");
+                        };
+                        Some(nf)
+                    }
+                    _ => return test_http(403, b"unsupported endorsement type"),
+                };
+
+                // Step 4: IssueResponse + atomic replay-protection insert.
+                let Ok(response) = ec_act::issue_response(
+                    &self.secret_key,
+                    &self.ctx_cred,
+                    self.initial_balance,
+                    verified_req,
+                ) else {
+                    return test_http(403, b"EC-ACT issue_response failed");
+                };
+                if let Some(nf) = maybe_nf {
+                    if !self.seen_endorsement_nullifiers.insert(nf) {
+                        return test_http(403, b"replayed endorsement nullifier");
+                    }
+                }
+
+                let mole_credential = MoleCredential::Response {
+                    credential_type: credential_type::EC_ACT,
+                    response: EcActIssuanceResponse { response }.to_bytes(),
+                }
+                .to_header_value()
+                .unwrap();
+
+                TestHttpResponse {
+                    status: 200,
+                    content_type: "text/plain".into(),
+                    www_authenticate: Vec::new(),
+                    mole_credential,
+                    cache_control: "no-store".into(),
+                    body: Vec::new(),
+                }
+            }
+            MoleAuthorization::Recovery {
+                credential_type: credential_type::EC_ACT,
+                recovery_handle,
+            } => {
+                let Ok(handle) = RecoveryHandle::from_bytes(&recovery_handle) else {
+                    return test_http(400, b"malformed RecoveryHandle");
+                };
+                if handle.key_id != self.key_id {
+                    return test_http(404, b"not found");
+                }
+                let Some(rec) = self.recorded_spends.get(&handle.nullifier) else {
+                    return test_http(404, b"not found");
+                };
+                if rec.presentation_sha256 != handle.presentation_sha256 {
+                    return test_http(404, b"not found");
+                }
+                match &rec.decision {
+                    RecordedSpendDecision::Held { hold_until, .. } => {
+                        if self.clock_secs < *hold_until {
+                            return test_http(404, b"still held");
+                        }
+                        let Some(cred) = self.finalize_held_decision(&handle.nullifier) else {
+                            return test_http(404, b"not found");
+                        };
+                        TestHttpResponse {
+                            status: 200,
+                            content_type: "text/plain".into(),
+                            www_authenticate: Vec::new(),
+                            mole_credential: cred.to_header_value().unwrap(),
+                            cache_control: "no-store".into(),
+                            body: Vec::new(),
+                        }
+                    }
+                    RecordedSpendDecision::Refund(bytes) => {
+                        if self.clock_secs.saturating_sub(rec.recorded_at)
+                            > self.result_retention_secs
+                        {
+                            return test_http(404, b"expired");
+                        }
+                        let cred = MoleCredential::Update {
+                            credential_type: credential_type::EC_ACT,
+                            update: Some(bytes.clone()),
+                        };
+                        TestHttpResponse {
+                            status: 200,
+                            content_type: "text/plain".into(),
+                            www_authenticate: Vec::new(),
+                            mole_credential: cred.to_header_value().unwrap(),
+                            cache_control: "no-store".into(),
+                            body: Vec::new(),
+                        }
+                    }
+                    RecordedSpendDecision::NoUpdate => {
+                        if self.clock_secs.saturating_sub(rec.recorded_at)
+                            > self.result_retention_secs
+                        {
+                            return test_http(404, b"expired");
+                        }
+                        let cred = MoleCredential::Update {
+                            credential_type: credential_type::EC_ACT,
+                            update: None,
+                        };
+                        TestHttpResponse {
+                            status: 200,
+                            content_type: "text/plain".into(),
+                            www_authenticate: Vec::new(),
+                            mole_credential: cred.to_header_value().unwrap(),
+                            cache_control: "no-store".into(),
+                            body: Vec::new(),
+                        }
+                    }
+                }
+            }
+            MoleAuthorization::Signoff {
+                credential_type: credential_type::EC_ACT,
+                recovery_handle,
+            } => {
+                let Ok(handle) = RecoveryHandle::from_bytes(&recovery_handle) else {
+                    return test_http(400, b"malformed RecoveryHandle");
+                };
+                if handle.key_id != self.key_id {
+                    return test_http(404, b"not found");
+                }
+                let Some(rec) = self.recorded_spends.get(&handle.nullifier) else {
+                    return test_http(404, b"not found");
+                };
+                if rec.presentation_sha256 != handle.presentation_sha256 {
+                    return test_http(404, b"not found");
+                }
+                let Some(cred) = self.finalize_held_decision(&handle.nullifier) else {
+                    return test_http(404, b"not found");
+                };
+                TestHttpResponse {
+                    status: 200,
+                    content_type: "text/plain".into(),
+                    www_authenticate: Vec::new(),
+                    mole_credential: cred.to_header_value().unwrap(),
+                    cache_control: "no-store".into(),
+                    body: Vec::new(),
+                }
+            }
+            _ => test_http(400, b"unsupported issue operation"),
         }
     }
 
-    fn redeem_and_issue(&mut self, bytes: &[u8]) -> TestHttpResponse {
-        let Ok(request) = CredentialRequest::from_bytes(bytes) else {
-            return self.reject();
+    /// Handles protected resource requests (`GET /gate`).
+    pub fn handle_resource(&mut self, authorization_header: &str) -> TestHttpResponse {
+        if authorization_header.is_empty() {
+            return self.challenge_401();
+        }
+        let Ok(auth) = MoleAuthorization::parse(authorization_header) else {
+            return test_http(400, b"malformed Authorization");
         };
-        if request.endorsement_type != endorsement_type::IHAT
-            || request.credential_type != credential_type::ACT
+        let MoleAuthorization::Presentation {
+            credential_type: ct,
+            presentation,
+        } = auth
+        else {
+            return test_http(400, b"expected presentation on resource endpoint");
+        };
+
+        // Unknown / greased credential types (`0x?A?A`) on required endpoints are
+        // challenged (`401`) per `draft-jms-mole-http-transport-01` §3.
+        if ct != credential_type::EC_ACT {
+            return self.challenge_401();
+        }
+
+        let Ok(pau) = EcActPresentationAndUpdate::from_bytes(&self.params, &presentation) else {
+            return test_http(403, b"malformed PresentationAndUpdate");
+        };
+        if pau.key_id != self.key_id {
+            return test_http(403, b"unknown key_id");
+        }
+        let nf = pau.spend.nullifier();
+        let pau_sha256 = sha256(&presentation);
+
+        // Step 1 (`draft-jms-mole-protocols-01` §5.2.3): check nullifier store for
+        // byte-identical duplicate (`409 Conflict` + retained result, no operation
+        // re-execution) vs conflicting double-spend (`403 Forbidden`)!
+        if let Some(existing) = self.recorded_spends.get(&nf) {
+            if existing.presentation_sha256 != pau_sha256
+                || self.clock_secs.saturating_sub(existing.recorded_at)
+                    > self.result_retention_secs
+            {
+                return test_http(403, b"conflicting or expired duplicate presentation");
+            }
+            let cred = match &existing.decision {
+                RecordedSpendDecision::Held { hold_until, .. } => MoleCredential::HeldForUpdate {
+                    credential_type: credential_type::EC_ACT,
+                    duration_secs: hold_until.saturating_sub(self.clock_secs),
+                },
+                RecordedSpendDecision::Refund(bytes) => MoleCredential::Update {
+                    credential_type: credential_type::EC_ACT,
+                    update: Some(bytes.clone()),
+                },
+                RecordedSpendDecision::NoUpdate => MoleCredential::Update {
+                    credential_type: credential_type::EC_ACT,
+                    update: None,
+                },
+            };
+            return TestHttpResponse {
+                status: 409,
+                content_type: "text/plain".into(),
+                www_authenticate: Vec::new(),
+                mole_credential: cred.to_header_value().unwrap(),
+                cache_control: "no-store".into(),
+                body: b"duplicate presentation\n".to_vec(),
+            };
+        }
+
+        // Step 2: check challenged amounts (`s`, `a`).
+        if pau.spend.amount() != self.spend_amount
+            || pau.spend.allowance() != self.max_top_up
         {
-            return self.challenge_response(String::new());
+            return test_http(403, b"spend amounts do not match challenge");
         }
 
-        // Redeem: verify the IHAT presentation, bound to this challenge.
-        let Ok(presentation) = IhatPresentation::from_bytes(&request.endorsement_presentation)
-        else {
-            return self.reject();
+        // Step 3: VerifySpend + record result atomically.
+        let Ok(ctx_spend) = self.ec_act_challenge().ctx_spend() else {
+            return test_http(500, b"challenge encode failed");
         };
-        let Ok(presentation) = ihat_boring::Presentation::from_wire(&presentation.bytes) else {
-            return self.reject();
-        };
-        let binding = challenge_digest(&self.moderator_challenge().to_bytes());
-        if !presentation.verify(&self.accepted, &binding) {
-            return self.reject();
-        }
-        if presentation.endorsement.endorsement_context != self.endorsement_context {
-            return self.reject();
-        }
-
-        // Issue: everything is validated before the nullifier is recorded,
-        // so a rejected request never spends the Client's Endorsement.
-        let Ok(issuance) = ActIssuanceRequest::from_bytes(&request.issuance_request) else {
-            return self.reject();
-        };
-        if issuance.truncated_key_id != self.act_key_id[31] {
-            return self.reject();
-        }
-        if issuance.requests.len() as u64 != self.issuance_batch {
-            return self.reject();
-        }
-        let Ok(act_requests) = issuance
-            .requests
-            .iter()
-            .map(|bytes| ActIssuanceRequestMsg::from_wire(bytes))
-            .collect::<Result<Vec<_>, _>>()
-        else {
-            return self.reject();
-        };
-        let Ok(responses) = act_requests
-            .iter()
-            .map(|act_request| {
-                self.act_key
-                    .issue::<BALANCE_DIGITS>(
-                        &self.act_params,
-                        act_request,
-                        u128::from(self.initial_credits),
-                        self.act_ctx.clone(),
-                    )
-                    .map(|response| response.to_wire().expect("issuance response encodes"))
-            })
-            .collect::<Result<Vec<_>, _>>()
-        else {
-            return self.reject();
+        let Ok(verified) = ec_act::verify_spend(
+            &self.params,
+            &self.secret_key,
+            &self.ctx_cred,
+            &ctx_spend,
+            &pau.spend,
+        ) else {
+            return test_http(403, b"EC-ACT verify_spend failed");
         };
 
-        // Recording the nullifier spends the Endorsement; it is the last
-        // check.
-        if !self.seen_endorsement_nullifiers.insert(presentation.endorsement.nf.clone()) {
-            return self.reject();
-        }
-
-        let credential_response = CredentialResponse {
-            credential_type: credential_type::ACT,
-            issuance_response: ActIssuanceResponse { responses }.to_bytes(),
+        let (decision, mole_cred) = if self.hold_duration_secs > 0 {
+            let hold_until = self.clock_secs.saturating_add(self.hold_duration_secs);
+            (
+                RecordedSpendDecision::Held {
+                    hold_until,
+                    raw_spend: pau.spend.to_bytes(),
+                },
+                MoleCredential::HeldForUpdate {
+                    credential_type: credential_type::EC_ACT,
+                    duration_secs: self.hold_duration_secs,
+                },
+            )
+        } else if self.withhold_update {
+            (
+                RecordedSpendDecision::NoUpdate,
+                MoleCredential::Update {
+                    credential_type: credential_type::EC_ACT,
+                    update: None,
+                },
+            )
+        } else {
+            let Ok(refund) = ec_act::issue_refund(verified, self.refund_amount) else {
+                return test_http(403, b"EC-ACT issue_refund failed");
+            };
+            let bytes = EcActUpdate { refund }.to_bytes();
+            (
+                RecordedSpendDecision::Refund(bytes.clone()),
+                MoleCredential::Update {
+                    credential_type: credential_type::EC_ACT,
+                    update: Some(bytes),
+                },
+            )
         };
-        self.challenge_response(
-            MoleCredential::Response(credential_response.to_bytes()).to_header_value(),
-        )
-    }
 
-    fn present(&mut self, bytes: &[u8]) -> TestHttpResponse {
-        let Ok(presentation) = CredentialPresentation::from_bytes(bytes) else {
-            return self.reject();
-        };
-        if presentation.credential_type != credential_type::ACT {
-            return self.challenge_response(String::new());
-        }
-        let Ok(pau) = ActPresentationAndUpdate::from_bytes(&presentation.presentation_and_update)
-        else {
-            return self.reject();
-        };
+        self.recorded_spends.insert(
+            nf,
+            RecordedSpend {
+                presentation_sha256: pau_sha256,
+                recorded_at: self.clock_secs,
+                decision,
+            },
+        );
 
-        let expected_digest = challenge_digest(&self.credential_challenge().to_bytes());
-        if pau.challenge_digest != expected_digest || pau.key_id != self.act_key_id {
-            return self.reject();
-        }
-
-        let Ok(spend) = SpendProof::from_wire(&pau.spend_proof) else {
-            return self.reject();
-        };
-        if scalar_to_u128(&spend.s) != Some(u128::from(self.charge))
-            || scalar_to_u128(&spend.a) != Some(0)
-            || !spend.ctx.ct_eq(&self.act_ctx)
-        {
-            return self.reject();
-        }
-
-        let Ok(refund) =
-            self.act_key.refund(&self.act_params, &spend, u128::from(self.refund), BALANCE_DIGITS)
-        else {
-            return self.reject();
-        };
-        if !self.seen_spend_nullifiers.insert(spend.k.to_bytes()) {
-            return self.reject();
-        }
-
-        let update = OptionalCredentialUpdate {
-            update: Some(CredentialUpdate {
-                credential_type: credential_type::ACT,
-                update_response: ActUpdate { refund: refund.to_wire().expect("refund encodes") }
-                    .to_bytes(),
-            }),
-        };
         TestHttpResponse {
             status: 200,
+            content_type: "text/plain".into(),
             www_authenticate: Vec::new(),
-            mole_credential: MoleCredential::Update(update.to_bytes()).to_header_value(),
+            mole_credential: mole_cred.to_header_value().unwrap(),
+            cache_control: "no-store".into(),
             body: b"the protected resource\n".to_vec(),
         }
     }
 
-    fn endorsement_nullifier_count(&self) -> usize {
+    pub fn endorsement_nullifier_count(&self) -> usize {
         self.seen_endorsement_nullifiers.len()
     }
 
-    fn spend_nullifier_count(&self) -> usize {
-        self.seen_spend_nullifiers.len()
+    pub fn spend_nullifier_count(&self) -> usize {
+        self.recorded_spends.len()
     }
 }

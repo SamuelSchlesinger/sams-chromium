@@ -1,0 +1,195 @@
+//! Replays the draft's test vectors against every algorithm and encoding.
+//! Every `rand` entry is served in place of `random`, so each output must
+//! match byte for byte.
+
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use mole_p256::hash::BackendHashExt;
+
+use super::Replay;
+use crate::backend::{Backend, POINT_LENGTH, Point, Scalar};
+use crate::permutation;
+use crate::protocol::{
+    ChallengeMessage, CommitMessage, Endorsement, PublicKey, Redemption, ResponseMessage,
+    SecretKey, challenge_with, commit_with, context_base_for_tests, delta_for_tests, finalize,
+    redeem_with, respond, verify, verify_redemption,
+};
+
+/// The draft's vectors.
+const DRAFT: &str = include_str!("../../tests/vectors/draft-ladd-mole-ec-ihat-00.txt");
+
+/// Parses the draft's `key = value` blocks, joining continuation lines.
+fn parse(text: &str) -> BTreeMap<String, String> {
+    let mut entries = BTreeMap::new();
+    let mut current: Option<(String, String)> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("    ") {
+            let (_, value) = current.as_mut().expect("continuation without key");
+            value.push_str(rest.trim());
+        } else if let Some((key, value)) = line.split_once(" =") {
+            if let Some((key, value)) = current.take() {
+                entries.insert(key, value);
+            }
+            current = Some((key.trim().to_string(), value.trim().to_string()));
+        }
+    }
+    if let Some((key, value)) = current {
+        entries.insert(key, value);
+    }
+    entries
+}
+
+struct Vectors(BTreeMap<String, String>);
+
+impl Vectors {
+    fn hex(&self, key: &str) -> Vec<u8> {
+        hex::decode(self.0.get(key).unwrap_or_else(|| panic!("missing {key}"))).expect(key)
+    }
+
+    fn int(&self, key: &str) -> usize {
+        self.0
+            .get(key)
+            .unwrap_or_else(|| panic!("missing {key}"))
+            .parse()
+            .expect(key)
+    }
+
+    /// The prefixes `redeemN` of the redemption blocks, in file order of
+    /// `N`.
+    fn redemptions(&self) -> Vec<String> {
+        let mut prefixes: Vec<(usize, String)> = self
+            .0
+            .keys()
+            .filter_map(|key| key.strip_suffix(".index"))
+            .map(|prefix| {
+                let n = prefix.trim_start_matches("redeem").parse().expect(prefix);
+                (n, prefix.to_string())
+            })
+            .collect();
+        prefixes.sort();
+        prefixes.into_iter().map(|(_, prefix)| prefix).collect()
+    }
+}
+
+fn scalars_hex<B: Backend>(scalars: &[B::Scalar]) -> Vec<u8> {
+    scalars.iter().flat_map(|s| s.to_bytes()).collect()
+}
+
+fn replay<B: Backend>(text: &str) {
+    let v = Vectors(parse(text));
+    assert_eq!(v.hex("suite.identifier"), crate::CIPHERSUITE_IDENTIFIER);
+    // `CreateProtocolContext(identifier) = "EC-IHATv1-" || identifier`.
+    assert_eq!(
+        [b"EC-IHATv1-".as_slice(), &v.hex("suite.identifier")].concat(),
+        crate::PROTOCOL_CONTEXT
+    );
+
+    let expected = v.hex("derive.scalars");
+    let scalars = B::derive_scalars(
+        crate::PROTOCOL_CONTEXT,
+        &v.hex("derive.rand"),
+        &v.hex("derive.info"),
+        expected.len() / crate::backend::SCALAR_LENGTH,
+    )
+    .unwrap();
+    assert_eq!(scalars_hex::<B>(&scalars), expected);
+
+    let seed: [u8; crate::SEED_LENGTH] = v.hex("key.rand").try_into().unwrap();
+    let key = SecretKey::<B>::from_seed(&seed).unwrap();
+    assert_eq!(key.sk.to_bytes().to_vec(), v.hex("key.skA"));
+    let public_key = key.public_key();
+    assert_eq!(public_key.to_bytes().to_vec(), v.hex("key.pkA"));
+    let p_pk = permutation::p::<B>(&public_key.pk).unwrap();
+    assert_eq!(p_pk.to_bytes().unwrap().to_vec(), v.hex("key.P_pkA"));
+    assert_eq!(permutation::p_inv::<B>(&p_pk).unwrap(), public_key.pk);
+
+    let ctx_iss = v.hex("issue.ctx_iss");
+    let ctx_red = v.hex("issue.ctx_red");
+    let z = context_base_for_tests::<B>(&ctx_iss);
+    assert_eq!(z.to_bytes().unwrap().to_vec(), v.hex("issue.Z"));
+
+    let mut rng = Replay::new(&v.hex("issue.commit.rand"));
+    let (anchor_state, commitment) = commit_with::<B, _>(&ctx_iss, &mut rng).unwrap();
+    rng.finish();
+    assert_eq!(anchor_state.vector_bytes(), v.hex("issue.commit.state"));
+    let encoded = commitment.to_bytes();
+    assert_eq!(encoded.to_vec(), v.hex("issue.commit.message"));
+    let commitment = CommitMessage::<B>::from_bytes(&encoded).unwrap();
+
+    let mut rng = Replay::new(&v.hex("issue.challenge.rand"));
+    let (client_state, challenge) =
+        challenge_with(&public_key, &ctx_iss, &ctx_red, &commitment, &mut rng).unwrap();
+    rng.finish();
+    assert_eq!(client_state.vector_bytes(), v.hex("issue.challenge.state"));
+    let encoded = challenge.to_bytes();
+    assert_eq!(encoded.to_vec(), v.hex("issue.challenge.message"));
+    let challenge = ChallengeMessage::<B>::from_bytes(&encoded).unwrap();
+
+    let response = respond(&key, anchor_state, &challenge).unwrap();
+    let encoded = response.to_bytes();
+    assert_eq!(encoded.to_vec(), v.hex("issue.response.message"));
+    let response = ResponseMessage::<B>::from_bytes(&encoded).unwrap();
+
+    let endorsement = finalize(&public_key, client_state, &response).unwrap();
+    verify(&public_key, &endorsement, &ctx_iss, &ctx_red).unwrap();
+    let stored = endorsement.to_bytes();
+    assert_eq!(stored.to_vec(), v.hex("issue.endorsement"));
+    assert_eq!(stored.len(), Endorsement::<B>::LENGTH);
+
+    let challenge_digest_key = |prefix: &str| alloc::format!("{prefix}.challenge_digest");
+    let redemptions = v.redemptions();
+    assert!(!redemptions.is_empty(), "no redemptions");
+    for prefix in redemptions {
+        let key = |name: &str| alloc::format!("{prefix}.{name}");
+        let index = v.int(&key("index"));
+        let anchor_set: Vec<PublicKey<B>> = v
+            .hex(&key("anchor_set"))
+            .chunks(POINT_LENGTH)
+            .map(|chunk| PublicKey::from_bytes(chunk.try_into().unwrap()).unwrap())
+            .collect();
+        assert_eq!(anchor_set[index], public_key);
+        let n = anchor_set.len();
+        let challenge_digest = v.hex(&challenge_digest_key(&prefix));
+        let rand = v.hex(&key("rand"));
+        assert_eq!(
+            delta_for_tests::<B>(&rand).to_bytes().to_vec(),
+            v.hex(&key("delta"))
+        );
+
+        // Every redemption presents the same Endorsement.
+        let endorsement = Endorsement::<B>::from_bytes(&stored).unwrap();
+        let mut rng = Replay::new(&rand);
+        let redemption = redeem_with(
+            &anchor_set,
+            index,
+            endorsement,
+            &ctx_iss,
+            &ctx_red,
+            &challenge_digest,
+            &mut rng,
+        )
+        .unwrap();
+        rng.finish();
+        let encoded = redemption.to_bytes();
+        assert_eq!(encoded, v.hex(&key("message")), "{prefix}");
+        assert_eq!(encoded.len(), Redemption::<B>::encoded_len(n));
+        let redemption = Redemption::<B>::from_bytes(&encoded, n).unwrap();
+        let nf = verify_redemption(
+            &anchor_set,
+            &redemption,
+            &ctx_iss,
+            &ctx_red,
+            &challenge_digest,
+        )
+        .unwrap();
+        assert_eq!(nf.to_vec(), v.hex(&key("nf")));
+    }
+}
+
+fn draft<B: Backend>() {
+    replay::<B>(DRAFT);
+}
+
+backend_tests!(draft);

@@ -1,31 +1,62 @@
-//! Glue for the ACT credential mapping (credential type 0x0001): the balance
-//! digit count and the ACT key identifiers.
-//!
-//! The shared request-context scalar (bound to every credit token so
-//! presentations don't link back to Redeem & Issue) is a P-256 value derived
-//! in `act_boring::proofs::request_context_scalar`; the browser runtime uses
-//! that directly, so no ristretto version lives here.
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
 
-/// The ACT balance digit count D this instantiation runs at: balances lie in
-/// [0, 3^8) = [0, 6561). Proof sizes are determined by D, so it is fixed
-/// policy-wide and published in the Moderator directory as
-/// `act-balance-digits`.
-pub const BALANCE_DIGITS: usize = 8;
+//! EC-ACT credential protocol glue (`draft-jms-mole-protocols-01` §5.2):
+//! key identifiers, `ctx_cred` derivation, and 96-byte recovery/signoff handles.
 
-/// The key identifier of an ACT public key: SHA-256 over its 32-byte
-/// encoding. Carried in full in `PresentationAndUpdate` and truncated to its
-/// final byte in `IssuanceRequest`, following the Privacy Pass convention.
-pub fn key_id(public_key_bytes: &[u8]) -> [u8; 32] {
-    const DST: &[u8] = b"MoLE-ACT:key-id:v1";
-    let mut input = Vec::with_capacity(DST.len() + public_key_bytes.len());
-    input.extend_from_slice(DST);
-    input.extend_from_slice(public_key_bytes);
-    sigma_boring::sha256(&input)
+use crate::wire::WireError;
+use crate::{MAX_CREDENTIAL_CONTEXT_LEN, sha256};
+
+/// Default EC-ACT balance width `L = 8` (`[0, 2^8) = [0, 256)`), matching the
+/// example configuration in `draft-jms-mole-protocols-01` §6.
+pub const DEFAULT_BALANCE_WIDTH: u8 = 8;
+
+/// Computes `key_id = SHA-256(SerializeElement(pkM))` (`draft-jms-mole-protocols-01` §5.2.1).
+pub fn key_id(pk_m_bytes: &[u8; 33]) -> [u8; 32] {
+    sha256(pk_m_bytes)
 }
 
-/// The truncated key identifier: the final byte of [`key_id`].
-pub fn truncated_key_id(public_key_bytes: &[u8]) -> u8 {
-    key_id(public_key_bytes)[31]
+/// Computes `key_id` directly from an [`ec_act::PublicKey`].
+pub fn compute_ec_act_key_id(pk_m: &ec_act::PublicKey) -> [u8; 32] {
+    key_id(&pk_m.to_bytes())
+}
+
+/// Returns `truncated_key_id`, the last byte of `key_id` (`draft-jms-mole-protocols-01` §5.2.1).
+pub fn truncated_key_id(key_id_bytes: &[u8; 32]) -> u8 {
+    key_id_bytes[31]
+}
+
+/// Derives `ctx_cred = credential_context || I2OSP(L, 1)` (`draft-jms-mole-protocols-01` §5.2.1).
+pub fn derive_ctx_cred(
+    credential_context: &[u8],
+    balance_width: u8,
+) -> Result<Vec<u8>, WireError> {
+    if credential_context.len() > MAX_CREDENTIAL_CONTEXT_LEN {
+        return Err(WireError::OutOfRange);
+    }
+    if balance_width == 0 || balance_width > ec_act::MAX_BALANCE_WIDTH {
+        return Err(WireError::OutOfRange);
+    }
+    let mut out = Vec::with_capacity(credential_context.len() + 1);
+    out.extend_from_slice(credential_context);
+    out.push(balance_width);
+    Ok(out)
+}
+
+/// Computes the 96-byte EC-ACT recovery / signoff handle (`draft-jms-mole-protocols-01` §5.2.5):
+/// `key_id || SerializeScalar(spend.k) || SHA-256(PresentationAndUpdate)`.
+pub fn compute_recovery_handle(
+    key_id_bytes: &[u8; 32],
+    nullifier_k: &[u8; 32],
+    presentation_and_update_bytes: &[u8],
+) -> [u8; 96] {
+    let digest = sha256(presentation_and_update_bytes);
+    let mut out = [0u8; 96];
+    out[..32].copy_from_slice(key_id_bytes);
+    out[32..64].copy_from_slice(nullifier_k);
+    out[64..96].copy_from_slice(&digest);
+    out
 }
 
 #[cfg(test)]
@@ -33,8 +64,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_id_truncation_is_last_byte() {
-        let pk = [7u8; 32];
-        assert_eq!(truncated_key_id(&pk), key_id(&pk)[31]);
+    fn key_id_has_no_nonstandard_dst_and_truncates_to_last_byte() {
+        let pk = [0x02u8; 33];
+        let kid = key_id(&pk);
+        assert_eq!(kid, sha256(&pk));
+        assert_eq!(truncated_key_id(&kid), kid[31]);
+    }
+
+    #[test]
+    fn ctx_cred_appends_balance_width_i2osp_1() {
+        let ctx = derive_ctx_cred(b"moderator-v1", 8).unwrap();
+        assert_eq!(ctx, b"moderator-v1\x08");
+        assert!(derive_ctx_cred(b"x", 0).is_err());
+        assert!(derive_ctx_cred(b"x", 65).is_err());
+        assert!(derive_ctx_cred(&vec![0u8; MAX_CREDENTIAL_CONTEXT_LEN + 1], 8).is_err());
     }
 }

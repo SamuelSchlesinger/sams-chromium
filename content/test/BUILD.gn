@@ -3314,6 +3314,7 @@ test("content_unittests") {
     "//components/input",
     "//components/metrics",
     "//components/metrics/private_metrics",
+    "//components/moderated_endorsements:mole_ffi",
     "//components/network_session_configurator/browser",
     "//components/network_session_configurator/common",
     "//components/offline_pages/buildflags",

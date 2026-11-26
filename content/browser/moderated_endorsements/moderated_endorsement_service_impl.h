@@ -5,14 +5,17 @@
 #ifndef CONTENT_BROWSER_MODERATED_ENDORSEMENTS_MODERATED_ENDORSEMENT_SERVICE_IMPL_H_
 #define CONTENT_BROWSER_MODERATED_ENDORSEMENTS_MODERATED_ENDORSEMENT_SERVICE_IMPL_H_
 
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "base/containers/flat_set.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "content/browser/moderated_endorsements/mole_client_holder.h"
 #include "content/public/browser/document_service.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "third_party/blink/public/mojom/moderated_endorsements/moderated_endorsements.mojom.h"
@@ -30,32 +33,34 @@ class SharedURLLoaderFactory;
 
 namespace content {
 
-class MoleClientHolder;
-
-// The browser-process side of navigator.endorsement: the MoLE user-agent
-// Client. Owns the HTTP exchanges with Anchors and Moderators; the
-// cryptographic state machine (endorsements, per-policy ACT credential
-// pools) lives in the Rust crate behind
-// //components/moderated_endorsements and is shared per BrowserContext, so
-// an endorsement collected on one site can answer a moderator challenge on
-// another.
+// Browser-process implementation of `navigator.endorsement` (`draft-jms-mole-protocols-01`
+// and `draft-jms-mole-http-transport-01`).
 //
-// Cross-site privacy model:
-//  - Credentials go to the Anchor (which authenticates the user) but never to
-//    the Moderator; challenge() presentations are cookieless and unlinkable.
-//  - challenge() never distinguishes "no endorsement" from any other failure
-//    (all collapse to an opaque rejection), and its no-endorsement path fetches
-//    the Moderator directory first, so possession is observable only to a
-//    caller that actually acts as a Moderator, not via a bare 401 probe.
-//  - Residual timing channel (documented, not closed here): a challenge that
-//    must Redeem & Issue makes more round-trips than one served from a warm
-//    pool, and the Moderator's Redeem & Issue is inherently heavier (more
-//    server time, a larger batched-credential response) than any
-//    client-forgeable decoy. Padding the client's round-trip COUNT would cost
-//    ~2x latency on the common warm-pool path and still not equalize the
-//    server-side work an end-to-end timer sees, so full uniformity requires a
-//    Moderator-side change (constant-time, fixed-size responses, or folding
-//    redeem+present into one exchange) rather than a client-only mitigation.
+// Owns the HTTPS exchanges with Anchors (`/.well-known/mole-anchor`,
+// `POST <grant-uri>`) and Moderators (`/.well-known/mole-moderator`,
+// `POST <issuance-uri>` for Redeem/Issue, Recovery, and Signoff, plus
+// `GET <resource_url>` for Presentation & Update). All cryptographic state
+// lives in the sans-I/O Rust crate behind `//components/moderated_endorsements`
+// and is scoped per `BrowserContext` via `MoleClientHolder` (ephemeral in
+// OffTheRecord profiles).
+//
+// Security & privacy properties:
+// - Cookies are sent ONLY to the same-origin Anchor during `collect()`; all
+//   Moderator requests (`GET <resource_url>`, `GET /.well-known/mole-moderator`,
+//   `POST <issuance-uri>`) run with `CredentialsMode::kOmit`.
+// - `challenge()` collapses "no usable endorsement" and protocol rejections to
+//   a single opaque `kRejected` outcome and performs a dummy Moderator
+//   directory fetch on the `needs_endorsement` branch so bare `401` probes
+//   cannot act as cross-site endorsement-possession oracles.
+// - Per-Moderator flight serialization (`MoleClientHolder::ScopedModeratorFlight`)
+//   sequences `Settle -> Probe -> [Redeem & Issue] -> Present -> Update` per
+//   Moderator origin so concurrent requests reuse a single EC-ACT credential
+//   chain (`Spend -> Refund`) without head-of-line blocking across distinct
+//   Moderators.
+// - Write-ahead persistence (`MoleClientHolder::PersistBeforeSend`) flushes
+//   `PendingSpend` before transmitting `presentation-0001`, and `Mole-Credential`
+//   headers are processed regardless of HTTP status code (`draft-jms-mole-http-transport-01`
+//   §4).
 class ModeratedEndorsementServiceImpl final
     : public DocumentService<blink::mojom::ModeratedEndorsementService> {
  public:
@@ -74,8 +79,7 @@ class ModeratedEndorsementServiceImpl final
 
  private:
   using UrlLoaderList = std::list<std::unique_ptr<network::SimpleURLLoader>>;
-  // (body, headers): body is nullopt on transport failure; headers are null
-  // when no response arrived at all.
+  using ScopedFlight = MoleClientHolder::ScopedModeratorFlight;
   using FetchCallback =
       base::OnceCallback<void(std::optional<std::string>,
                               scoped_refptr<net::HttpResponseHeaders>)>;
@@ -83,82 +87,96 @@ class ModeratedEndorsementServiceImpl final
   ModeratedEndorsementServiceImpl(
       RenderFrameHost&,
       mojo::PendingReceiver<blink::mojom::ModeratedEndorsementService>);
-  // Releases a held redemption flight so BrowserContext-wide challenge
-  // coordination cannot wedge when a document dies mid-redemption.
   ~ModeratedEndorsementServiceImpl() override;
 
-  // Issues one HTTP request. `authorization` (if non-empty) becomes the
-  // Authorization header; `post_body` (if non-null) makes it a POST with
-  // the MoLE endorsement-request media type.
   void Fetch(const GURL& url,
+             const std::string& method,
              const std::string& authorization,
-             std::unique_ptr<std::string> post_body,
+             const std::string& upload_content_type,
+             std::optional<std::string> upload_body,
              bool send_credentials,
              FetchCallback);
   void OnFetchComplete(UrlLoaderList::iterator,
                        FetchCallback,
                        std::optional<std::string> body);
 
-  // collect() steps. CollectImpl runs once the persisted state has loaded.
+  // `collect()` steps:
   void CollectImpl(const GURL& endorse_url, CollectCallback);
   void OnAnchorDirectory(const GURL& endorse_url,
                          CollectCallback,
                          std::optional<std::string> body,
                          scoped_refptr<net::HttpResponseHeaders>);
-  void OnGrantExchange(const GURL& endorse_url,
+  void OnGrantExchange(const GURL& grant_url,
+                       uint64_t grant_id,
                        CollectCallback,
                        std::optional<std::string> body,
                        scoped_refptr<net::HttpResponseHeaders>);
+  void AbortGrant(uint64_t grant_id);
 
-  // challenge() steps. `attempt` bounds pool-race retries.
-  void StartChallenge(const GURL& resource_url, ChallengeCallback, int attempt);
+  // `challenge()` steps:
+  void AcquireFlightAndStartChallenge(const GURL& resource_url,
+                                      ChallengeCallback,
+                                      int attempt);
+  void SettleOrProbeChallenge(const GURL& resource_url,
+                              ScopedFlight flight,
+                              ChallengeCallback,
+                              int attempt);
+  void OnSettlementExchange(const GURL& resource_url,
+                            ScopedFlight flight,
+                            uint64_t pending_id,
+                            ChallengeCallback,
+                            int attempt,
+                            std::optional<std::string> body,
+                            scoped_refptr<net::HttpResponseHeaders>);
   void OnChallengeProbe(const GURL& resource_url,
+                        ScopedFlight flight,
                         ChallengeCallback,
                         int attempt,
                         std::optional<std::string> body,
                         scoped_refptr<net::HttpResponseHeaders>);
+  void OnNoEndorsementDirectory(ScopedFlight flight,
+                                ChallengeCallback,
+                                std::optional<std::string> body,
+                                scoped_refptr<net::HttpResponseHeaders>);
   void OnModeratorDirectory(const GURL& resource_url,
+                            ScopedFlight flight,
                             ChallengeCallback,
                             int attempt,
                             std::vector<std::string> www_authenticate,
                             std::optional<std::string> body,
                             scoped_refptr<net::HttpResponseHeaders>);
-  // The "no usable endorsement" branch. It fetches the Moderator directory
-  // before returning the opaque rejection, so that reaching a
-  // possession-revealing outcome requires the caller to serve a genuine
-  // Moderator directory (i.e. act as a Moderator) — never a bare 401 probe.
-  // This equalizes the first round-trip with the redeem path and keeps
-  // endorsement possession observable only through real moderation.
-  void OnNoEndorsementDirectory(ChallengeCallback,
-                                std::optional<std::string> body,
-                                scoped_refptr<net::HttpResponseHeaders>);
   void OnRedeemExchange(const GURL& resource_url,
+                        ScopedFlight flight,
+                        uint64_t redeem_id,
                         ChallengeCallback,
                         int attempt,
                         std::vector<std::string> www_authenticate,
                         std::optional<std::string> body,
                         scoped_refptr<net::HttpResponseHeaders>);
+  void AbortRedeem(uint64_t redeem_id);
+
   void Present(const GURL& resource_url,
+               ScopedFlight flight,
                ChallengeCallback,
                int attempt,
                const std::vector<std::string>& www_authenticate);
-  void OnPresentExchange(ChallengeCallback,
+  void SendPresentAfterPersist(const GURL& resource_url,
+                               ScopedFlight flight,
+                               ChallengeCallback,
+                               uint64_t presentation_id,
+                               std::string authorization_header);
+  void OnPresentExchange(ScopedFlight flight,
+                         ChallengeCallback,
                          uint64_t presentation_id,
                          std::optional<std::string> body,
                          scoped_refptr<net::HttpResponseHeaders>);
-
-  // Ends a redemption (success or failure): wakes challenges that queued
-  // behind it.
-  void FinishRedeemFlight();
 
   MoleClientHolder& holder();
 
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
   UrlLoaderList loaders_in_progress_;
-
-  // True while this document's challenge flow holds the BrowserContext-wide
-  // Redeem & Issue slot.
-  bool owns_redeem_flight_ = false;
+  base::flat_set<uint64_t> active_grant_ids_;
+  base::flat_set<uint64_t> active_redeem_ids_;
 
   base::WeakPtrFactory<ModeratedEndorsementServiceImpl> weak_factory_{this};
 };

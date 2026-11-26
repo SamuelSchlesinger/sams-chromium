@@ -11,6 +11,7 @@
 #include "base/command_line.h"
 #include "base/json/json_reader.h"
 #include "base/no_destructor.h"
+#include "base/strings/string_util.h"
 #include "base/values.h"
 #include "content/public/browser/mole_key_commitments.h"
 #include "url/gurl.h"
@@ -23,27 +24,31 @@ namespace {
 // Dev/test override: inline registry JSON supplied on the command line, so a
 // deployment without the published component (e.g. content_shell demos, tests)
 // can still enroll Anchors and Moderators. Mirrors Private State Tokens'
-// --additional-trust-token-key-commitments.
+// `--additional-trust-token-key-commitments`.
 constexpr char kMoleKeyCommitmentsSwitch[] = "mole-key-commitments";
 
 // Top-level sections.
 constexpr char kAnchorsField[] = "anchors";
 constexpr char kModeratorsField[] = "moderators";
-// Anchor entry.
+// Anchor entry (`draft-jms-mole-protocols-01` §6).
+constexpr char kGrantUriField[] = "grant-uri";
 constexpr char kKeysField[] = "keys";
 constexpr char kEpochsField[] = "epochs";
-// Moderator entry.
+// Moderator policy entry (`draft-jms-mole-protocols-01` §6, §8).
 constexpr char kPoliciesField[] = "policies";
-constexpr char kPolicyContextField[] = "policy-context";
-constexpr char kActPublicKeyField[] = "act-public-key";
-constexpr char kActDomainSeparatorField[] = "act-domain-separator";
+constexpr char kCredentialContextField[] = "credential-context";
+constexpr char kCredentialKeyField[] = "credential-key";
+constexpr char kBalanceWidthField[] = "balance-width";
+constexpr char kInitialBalanceField[] = "initial-balance";
+constexpr char kSpendAmountField[] = "spend-amount";
+constexpr char kMaxTopUpField[] = "max-top-up";
 constexpr char kAcceptedAnchorKeysField[] = "accepted-anchor-keys";
-constexpr char kChargeField[] = "charge";
-constexpr char kTopupField[] = "topup";
+constexpr char kAllowNoEndorsementField[] = "allow-no-endorsement";
+constexpr char kIssuanceUriField[] = "issuance-uri";
 
 using Bytes = std::vector<uint8_t>;
 
-// base64url-without-padding, matching mole_core's wire encoding, into bytes.
+// Unpadded base64url (RFC 4648 §5), matching `mole_core`'s wire encoding.
 std::optional<Bytes> DecodeB64(const std::string& in) {
   std::string decoded;
   if (!base::Base64UrlDecode(in, base::Base64UrlDecodePolicy::DISALLOW_PADDING,
@@ -68,10 +73,10 @@ bool DecodeB64Array(const base::ListValue& list, std::vector<Bytes>* out) {
   return true;
 }
 
-// Canonical serialized origin ("https://host:port"), or empty if unsuitable.
+// Canonical serialized HTTPS origin ("https://host:port"), or empty if invalid.
 std::string CanonicalOrigin(const std::string& raw) {
   url::Origin origin = url::Origin::Create(GURL(raw));
-  if (origin.opaque()) {
+  if (origin.opaque() || origin.scheme() != "https") {
     return std::string();
   }
   return origin.Serialize();
@@ -148,6 +153,13 @@ bool MoleCommitmentRegistry::ParseAndSet(std::string_view json) {
         return false;
       }
       CommittedAnchor anchor;
+      if (const base::Value* grant_uri_val = entry->Find(kGrantUriField)) {
+        if (!grant_uri_val->is_string() ||
+            !base::IsStringUTF8(grant_uri_val->GetString())) {
+          return false;
+        }
+        anchor.grant_uri = grant_uri_val->GetString();
+      }
       const base::ListValue* keys = entry->FindList(kKeysField);
       const base::ListValue* epochs = entry->FindList(kEpochsField);
       if (!keys || !epochs || !DecodeB64Array(*keys, &anchor.keys) ||
@@ -176,39 +188,63 @@ bool MoleCommitmentRegistry::ParseAndSet(std::string_view json) {
         if (!policy) {
           return false;
         }
-        const std::string* policy_context =
-            policy->FindString(kPolicyContextField);
-        const std::string* act_public_key =
-            policy->FindString(kActPublicKeyField);
-        const std::string* act_domain_separator =
-            policy->FindString(kActDomainSeparatorField);
+        const std::string* credential_context =
+            policy->FindString(kCredentialContextField);
+        const std::string* credential_key =
+            policy->FindString(kCredentialKeyField);
         const base::ListValue* accepted =
             policy->FindList(kAcceptedAnchorKeysField);
         const base::ListValue* epochs = policy->FindList(kEpochsField);
-        if (!policy_context || !act_public_key || !act_domain_separator ||
-            !accepted || !epochs) {
+        if (!credential_context || !credential_key || !accepted || !epochs) {
           return false;
         }
         CommittedPolicy committed;
-        std::optional<Bytes> pc = DecodeB64(*policy_context);
-        std::optional<Bytes> apk = DecodeB64(*act_public_key);
-        std::optional<Bytes> ads = DecodeB64(*act_domain_separator);
-        if (!pc || !apk || !ads ||
+        std::optional<Bytes> cc = DecodeB64(*credential_context);
+        std::optional<Bytes> ck = DecodeB64(*credential_key);
+        if (!cc || !ck ||
             !DecodeB64Array(*accepted, &committed.accepted_anchor_keys) ||
             !DecodeB64Array(*epochs, &committed.epochs)) {
           return false;
         }
-        committed.policy_context = std::move(*pc);
-        committed.act_public_key = std::move(*apk);
-        committed.act_domain_separator = std::move(*ads);
-        // `charge` is required and must be non-negative; `topup` defaults to 0.
-        std::optional<int> charge = policy->FindInt(kChargeField);
-        std::optional<int> topup = policy->FindInt(kTopupField);
-        if (!charge || *charge < 0 || (topup && *topup < 0)) {
+        committed.credential_context = std::move(*cc);
+        committed.credential_key = std::move(*ck);
+
+        // `balance-width` is required and must be in `1..=64` (`draft-schlesinger-mole-ec-act-00`).
+        std::optional<int> balance_width = policy->FindInt(kBalanceWidthField);
+        if (!balance_width || *balance_width < 1 || *balance_width > 64) {
           return false;
         }
-        committed.charge = static_cast<uint64_t>(*charge);
-        committed.topup = static_cast<uint64_t>(topup.value_or(0));
+        committed.balance_width = static_cast<uint8_t>(*balance_width);
+
+        // `initial-balance` and `spend-amount` are required and non-negative;
+        // `max-top-up` defaults to 0.
+        std::optional<int> initial_balance =
+            policy->FindInt(kInitialBalanceField);
+        std::optional<int> spend_amount = policy->FindInt(kSpendAmountField);
+        std::optional<int> max_top_up = policy->FindInt(kMaxTopUpField);
+        if (!initial_balance || *initial_balance < 0 || !spend_amount ||
+            *spend_amount < 0 || (max_top_up && *max_top_up < 0)) {
+          return false;
+        }
+        committed.initial_balance = static_cast<uint64_t>(*initial_balance);
+        committed.spend_amount = static_cast<uint64_t>(*spend_amount);
+        committed.max_top_up = static_cast<uint64_t>(max_top_up.value_or(0));
+
+        if (const base::Value* allow_val =
+                policy->Find(kAllowNoEndorsementField)) {
+          if (!allow_val->is_bool()) {
+            return false;
+          }
+          committed.allow_no_endorsement = allow_val->GetBool();
+        }
+        if (const base::Value* iss_uri_val = policy->Find(kIssuanceUriField)) {
+          if (!iss_uri_val->is_string() ||
+              !base::IsStringUTF8(iss_uri_val->GetString())) {
+            return false;
+          }
+          committed.issuance_uri = iss_uri_val->GetString();
+        }
+
         moderator.policies.push_back(std::move(committed));
       }
       moderators.insert_or_assign(std::move(origin), std::move(moderator));
@@ -229,6 +265,7 @@ MoleCommitmentRegistry::GetAnchorCommitment(const url::Origin& origin) const {
     return out;
   }
   out.found = true;
+  out.grant_uri = rust::String(it->second.grant_uri);
   out.keys = ToBlobs(it->second.keys);
   out.epochs = ToBlobs(it->second.epochs);
   return out;
@@ -246,13 +283,16 @@ MoleCommitmentRegistry::GetModeratorCommitment(
   out.found = true;
   for (const CommittedPolicy& policy : it->second.policies) {
     moderated_endorsements::CommittedPolicy p;
-    p.policy_context = ToRustVec(policy.policy_context);
-    p.act_public_key = ToRustVec(policy.act_public_key);
-    p.act_domain_separator = ToRustVec(policy.act_domain_separator);
+    p.credential_context = ToRustVec(policy.credential_context);
+    p.credential_key = ToRustVec(policy.credential_key);
+    p.balance_width = policy.balance_width;
+    p.initial_balance = policy.initial_balance;
+    p.spend_amount = policy.spend_amount;
+    p.max_top_up = policy.max_top_up;
     p.accepted_anchor_keys = ToBlobs(policy.accepted_anchor_keys);
     p.epochs = ToBlobs(policy.epochs);
-    p.charge = policy.charge;
-    p.topup = policy.topup;
+    p.allow_no_endorsement = policy.allow_no_endorsement;
+    p.issuance_uri = rust::String(policy.issuance_uri);
     out.policies.push_back(std::move(p));
   }
   return out;

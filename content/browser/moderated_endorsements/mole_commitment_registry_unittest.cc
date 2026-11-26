@@ -29,13 +29,15 @@ url::Origin Origin(const std::string& s) {
   return url::Origin::Create(GURL(s));
 }
 
-// A registry document naming one anchor (key "AK", epoch "E1") and one
-// moderator (policy "P", act key "MK", domain "D", accepted {"AK"}, epoch
-// "E1").
+// A `-01` registry document naming one Anchor (grant-uri, key "AK", epoch "E1")
+// and one Moderator (credential-context "P", credential-key "MK", balance-width
+// 8, initial-balance 4, spend-amount 1, max-top-up 0, accepted {"AK"}, epoch
+// "E1", issuance-uri).
 std::string SampleRegistry() {
   return R"({
     "anchors": {
       "https://anchor.example": {
+        "grant-uri": "https://anchor.example/mole/grant",
         "keys": [")" +
          B64("AK") + R"("],
         "epochs": [")" +
@@ -45,18 +47,20 @@ std::string SampleRegistry() {
     "moderators": {
       "https://mod.example": {
         "policies": [{
-          "policy-context": ")" +
+          "credential-context": ")" +
          B64("P") + R"(",
-          "act-public-key": ")" +
+          "credential-key": ")" +
          B64("MK") + R"(",
-          "act-domain-separator": ")" +
-         B64("D") + R"(",
+          "balance-width": 8,
+          "initial-balance": 4,
+          "spend-amount": 1,
+          "max-top-up": 2,
           "accepted-anchor-keys": [")" +
          B64("AK") + R"("],
           "epochs": [")" +
-         B64("E1") + R"("],
-          "charge": 1,
-          "topup": 0
+         B64("E1") + R"(",
+          "allow-no-endorsement": false,
+          "issuance-uri": "https://mod.example/mole/issue"
         }]
       }
     }
@@ -79,6 +83,8 @@ TEST_F(MoleCommitmentRegistryTest, ParsesAndReturnsCommittedAnchor) {
 
   auto anchor = registry.GetAnchorCommitment(Origin("https://anchor.example"));
   EXPECT_TRUE(anchor.found);
+  EXPECT_EQ(std::string(anchor.grant_uri),
+            "https://anchor.example/mole/grant");
   ASSERT_EQ(anchor.keys.size(), 1u);
   EXPECT_EQ(std::vector<uint8_t>(anchor.keys[0].bytes.begin(),
                                  anchor.keys[0].bytes.end()),
@@ -97,21 +103,22 @@ TEST_F(MoleCommitmentRegistryTest, ParsesAndReturnsCommittedModerator) {
   EXPECT_TRUE(mod.found);
   ASSERT_EQ(mod.policies.size(), 1u);
   const auto& p = mod.policies[0];
+  EXPECT_EQ(std::vector<uint8_t>(p.credential_context.begin(),
+                                 p.credential_context.end()),
+            Bytes("P"));
   EXPECT_EQ(
-      std::vector<uint8_t>(p.policy_context.begin(), p.policy_context.end()),
-      Bytes("P"));
-  EXPECT_EQ(
-      std::vector<uint8_t>(p.act_public_key.begin(), p.act_public_key.end()),
+      std::vector<uint8_t>(p.credential_key.begin(), p.credential_key.end()),
       Bytes("MK"));
-  EXPECT_EQ(std::vector<uint8_t>(p.act_domain_separator.begin(),
-                                 p.act_domain_separator.end()),
-            Bytes("D"));
+  EXPECT_EQ(p.balance_width, 8u);
+  EXPECT_EQ(p.initial_balance, 4u);
+  EXPECT_EQ(p.spend_amount, 1u);
+  EXPECT_EQ(p.max_top_up, 2u);
+  EXPECT_FALSE(p.allow_no_endorsement);
+  EXPECT_EQ(std::string(p.issuance_uri), "https://mod.example/mole/issue");
   ASSERT_EQ(p.accepted_anchor_keys.size(), 1u);
   EXPECT_EQ(std::vector<uint8_t>(p.accepted_anchor_keys[0].bytes.begin(),
                                  p.accepted_anchor_keys[0].bytes.end()),
             Bytes("AK"));
-  EXPECT_EQ(p.charge, 1u);
-  EXPECT_EQ(p.topup, 0u);
 }
 
 TEST_F(MoleCommitmentRegistryTest, UnenrolledOriginIsNotFound) {
@@ -122,16 +129,61 @@ TEST_F(MoleCommitmentRegistryTest, UnenrolledOriginIsNotFound) {
       registry.GetAnchorCommitment(Origin("https://other.example")).found);
   EXPECT_FALSE(
       registry.GetModeratorCommitment(Origin("https://other.example")).found);
-  // A moderator origin is not, by that fact, an anchor origin.
   EXPECT_FALSE(
       registry.GetAnchorCommitment(Origin("https://mod.example")).found);
+}
+
+TEST_F(MoleCommitmentRegistryTest,
+       RejectsOutOfRangeBalanceWidthOrMissingInitialBalance) {
+  auto& registry = MoleCommitmentRegistry::GetInstance();
+  ASSERT_TRUE(registry.ParseAndSet(SampleRegistry()));
+
+  // `balance-width` 0 and 65 are outside `1..=64` (`draft-schlesinger-mole-ec-act-00`).
+  EXPECT_FALSE(registry.ParseAndSet(R"({
+    "moderators": {
+      "https://mod.example": {
+        "policies": [{
+          "credential-context": ")" +
+                                    B64("P") + R"(",
+          "credential-key": ")" + B64("MK") +
+                                    R"(",
+          "balance-width": 65,
+          "initial-balance": 4,
+          "spend-amount": 1,
+          "accepted-anchor-keys": [],
+          "epochs": []
+        }]
+      }
+    }
+  })"));
+
+  // Missing `initial-balance` is rejected so initial-balance tagging stays closed.
+  EXPECT_FALSE(registry.ParseAndSet(R"({
+    "moderators": {
+      "https://mod.example": {
+        "policies": [{
+          "credential-context": ")" +
+                                    B64("P") + R"(",
+          "credential-key": ")" + B64("MK") +
+                                    R"(",
+          "balance-width": 8,
+          "spend-amount": 1,
+          "accepted-anchor-keys": [],
+          "epochs": []
+        }]
+      }
+    }
+  })"));
+
+  // Previous valid state remains intact.
+  EXPECT_TRUE(
+      registry.GetModeratorCommitment(Origin("https://mod.example")).found);
 }
 
 TEST_F(MoleCommitmentRegistryTest, MalformedInputLeavesPreviousStateIntact) {
   auto& registry = MoleCommitmentRegistry::GetInstance();
   ASSERT_TRUE(registry.ParseAndSet(SampleRegistry()));
 
-  // Not JSON, a non-object, and a bad-base64 key all fail without clobbering.
   EXPECT_FALSE(registry.ParseAndSet("this is not json"));
   EXPECT_FALSE(registry.ParseAndSet("[]"));
   EXPECT_FALSE(registry.ParseAndSet(
@@ -141,10 +193,12 @@ TEST_F(MoleCommitmentRegistryTest, MalformedInputLeavesPreviousStateIntact) {
       registry.GetAnchorCommitment(Origin("https://anchor.example")).found);
 }
 
-TEST_F(MoleCommitmentRegistryTest, OpaqueOriginKeyIsRejected) {
+TEST_F(MoleCommitmentRegistryTest, NonHttpsOrOpaqueOriginKeyIsRejected) {
   auto& registry = MoleCommitmentRegistry::GetInstance();
   EXPECT_FALSE(registry.ParseAndSet(
       R"({"anchors":{"not a url":{"keys":[],"epochs":[]}}})"));
+  EXPECT_FALSE(registry.ParseAndSet(
+      R"({"anchors":{"http://insecure.example":{"keys":[],"epochs":[]}}})"));
 }
 
 }  // namespace

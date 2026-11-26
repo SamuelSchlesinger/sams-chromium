@@ -4,11 +4,11 @@
 
 #include "content/browser/moderated_endorsements/mole_client_holder.h"
 
-#include <string>
 #include <utility>
 
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
@@ -25,11 +25,9 @@ const char kMoleClientHolderKey[] = "moderated-endorsements-mole-client";
 constexpr base::FilePath::CharType kStateFileName[] =
     FILE_PATH_LITERAL("MoleClientState");
 
-// How long to coalesce a burst of state changes into a single disk write.
+// How long to coalesce non-critical state mutations into a single disk write.
 constexpr base::TimeDelta kPersistDelay = base::Seconds(5);
 
-// Runs on the backend sequence: read the persisted blob, or nullopt when it is
-// absent or unreadable (a fresh profile, or a wiped file).
 std::optional<std::vector<uint8_t>> ReadStateOnBackend(
     const base::FilePath& path) {
   std::string contents;
@@ -41,25 +39,74 @@ std::optional<std::vector<uint8_t>> ReadStateOnBackend(
 
 }  // namespace
 
+MoleClientHolder::ScopedModeratorFlight::ScopedModeratorFlight() = default;
+
+MoleClientHolder::ScopedModeratorFlight::ScopedModeratorFlight(
+    base::WeakPtr<MoleClientHolder> holder,
+    std::string moderator_origin)
+    : holder_(std::move(holder)),
+      moderator_origin_(std::move(moderator_origin)) {}
+
+MoleClientHolder::ScopedModeratorFlight::ScopedModeratorFlight(
+    ScopedModeratorFlight&& other) noexcept
+    : holder_(std::move(other.holder_)),
+      moderator_origin_(std::move(other.moderator_origin_)) {
+  other.holder_.reset();
+  other.moderator_origin_.clear();
+}
+
+MoleClientHolder::ScopedModeratorFlight&
+MoleClientHolder::ScopedModeratorFlight::operator=(
+    ScopedModeratorFlight&& other) noexcept {
+  if (this != &other) {
+    Release();
+    holder_ = std::move(other.holder_);
+    moderator_origin_ = std::move(other.moderator_origin_);
+    other.holder_.reset();
+    other.moderator_origin_.clear();
+  }
+  return *this;
+}
+
+MoleClientHolder::ScopedModeratorFlight::~ScopedModeratorFlight() {
+  Release();
+}
+
+void MoleClientHolder::ScopedModeratorFlight::Release() {
+  if (holder_ && !moderator_origin_.empty()) {
+    std::string origin = std::move(moderator_origin_);
+    moderator_origin_.clear();
+    MoleClientHolder* holder = holder_.get();
+    holder_.reset();
+    holder->ReleaseModeratorFlight(origin);
+  } else {
+    holder_.reset();
+    moderator_origin_.clear();
+  }
+}
+
 MoleClientHolder::MoleClientHolder(const base::FilePath& profile_path)
-    : backend_task_runner_(base::ThreadPool::CreateSequencedTaskRunner(
-          {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
-           base::TaskShutdownBehavior::BLOCK_SHUTDOWN})),
-      writer_(profile_path.Append(kStateFileName),
-              backend_task_runner_,
-              kPersistDelay,
-              "MoleClientState"),
-      client_(moderated_endorsements::new_mole_browser_client()) {
+    : client_(moderated_endorsements::new_mole_browser_client()) {
+  if (profile_path.empty()) {
+    // Ephemeral / OffTheRecord BrowserContext: never read or write on-disk
+    // state.
+    loaded_ = true;
+    return;
+  }
+
+  backend_task_runner_ = base::ThreadPool::CreateSequencedTaskRunner(
+      {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
+       base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
+  writer_.emplace(profile_path.Append(kStateFileName), backend_task_runner_,
+                  kPersistDelay, "MoleClientState");
   backend_task_runner_->PostTaskAndReplyWithResult(
-      FROM_HERE, base::BindOnce(&ReadStateOnBackend, writer_.path()),
+      FROM_HERE, base::BindOnce(&ReadStateOnBackend, writer_->path()),
       base::BindOnce(&MoleClientHolder::OnLoaded, weak_factory_.GetWeakPtr()));
 }
 
 MoleClientHolder::~MoleClientHolder() {
-  // Flush any debounced write so a pending state change is not lost at
-  // shutdown (the backend runner is BLOCK_SHUTDOWN).
-  if (writer_.HasPendingWrite()) {
-    writer_.DoScheduledWrite();
+  if (writer_ && writer_->HasPendingWrite()) {
+    writer_->DoScheduledWrite();
   }
 }
 
@@ -69,16 +116,15 @@ MoleClientHolder& MoleClientHolder::GetOrCreate(
   auto* holder = static_cast<MoleClientHolder*>(
       browser_context->GetUserData(kMoleClientHolderKey));
   if (!holder) {
-    auto owned = std::make_unique<MoleClientHolder>(browser_context->GetPath());
+    // OffTheRecord profiles frequently share `GetPath()` with their parent
+    // regular profile; pass an empty path so Incognito/Guest contexts stay
+    // strictly in-memory and isolated from regular-profile state.
+    const base::FilePath storage_dir = browser_context->IsOffTheRecord()
+                                           ? base::FilePath()
+                                           : browser_context->GetPath();
+    auto owned = std::make_unique<MoleClientHolder>(storage_dir);
     holder = owned.get();
     browser_context->SetUserData(kMoleClientHolderKey, std::move(owned));
-    // Wipe the store when the user clears browsing data. We deliberately do
-    // NOT keep a ScopedObservation or RemoveObserver later: the default
-    // StoragePartition is destroyed during BrowserContext shutdown (before
-    // this SupportsUserData is), so removing at destruction would touch a
-    // freed partition. DataRemovalObserver is a base::CheckedObserver, so a
-    // destroyed holder self-invalidates and the ObserverList skips it — the
-    // registration needs no explicit teardown.
     browser_context->GetDefaultStoragePartition()->AddObserver(holder);
   }
   return *holder;
@@ -93,12 +139,71 @@ void MoleClientHolder::PostWhenLoaded(base::OnceClosure op) {
 }
 
 void MoleClientHolder::SchedulePersist() {
-  writer_.ScheduleWriteWithBackgroundDataSerializer(this);
+  if (writer_) {
+    writer_->ScheduleWriteWithBackgroundDataSerializer(this);
+  }
+}
+
+void MoleClientHolder::PersistBeforeSend(base::OnceClosure after_flush) {
+  if (!writer_) {
+    std::move(after_flush).Run();
+    return;
+  }
+  rust::Vec<uint8_t> blob = client_->serialize_state();
+  std::string data(blob.begin(), blob.end());
+  // `WriteNow` cancels any pending debounced timer and posts an atomic
+  // temp-file write + fsync + rename onto `backend_task_runner_`. Because
+  // `backend_task_runner_` is a `SequencedTaskRunner`, the barrier task below
+  // replies on the UI thread strictly after that atomic write completes, and
+  // concurrent flushes for distinct Moderators never clobber one another's
+  // callbacks.
+  writer_->WriteNow(std::move(data));
+  backend_task_runner_->PostTaskAndReply(FROM_HERE, base::DoNothing(),
+                                         std::move(after_flush));
+}
+
+std::optional<MoleClientHolder::ScopedModeratorFlight>
+MoleClientHolder::TryAcquireModeratorFlight(
+    const std::string& moderator_origin) {
+  ModeratorFlightQueue& queue = moderator_flights_[moderator_origin];
+  if (queue.in_flight) {
+    return std::nullopt;
+  }
+  queue.in_flight = true;
+  return ScopedModeratorFlight(weak_factory_.GetWeakPtr(), moderator_origin);
+}
+
+void MoleClientHolder::EnqueueModeratorWaiter(
+    const std::string& moderator_origin,
+    base::OnceClosure resume) {
+  ModeratorFlightQueue& queue = moderator_flights_[moderator_origin];
+  if (!queue.in_flight) {
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+                                                             std::move(resume));
+    return;
+  }
+  queue.waiters.push_back(std::move(resume));
+}
+
+void MoleClientHolder::ReleaseModeratorFlight(
+    const std::string& moderator_origin) {
+  auto it = moderator_flights_.find(moderator_origin);
+  if (it == moderator_flights_.end()) {
+    return;
+  }
+  it->second.in_flight = false;
+  if (it->second.waiters.empty()) {
+    moderator_flights_.erase(it);
+    return;
+  }
+  base::OnceClosure next = std::move(it->second.waiters.front());
+  it->second.waiters.erase(it->second.waiters.begin());
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+                                                           std::move(next));
 }
 
 void MoleClientHolder::ClearAndReset() {
   client_ = moderated_endorsements::new_mole_browser_client();
-  // Persist the now-empty state, overwriting the on-disk blob.
   SchedulePersist();
 }
 
@@ -107,10 +212,6 @@ void MoleClientHolder::OnStorageKeyDataCleared(
     StoragePartition::StorageKeyMatcherFunction storage_key_matcher,
     base::Time begin,
     base::Time end) {
-  // Cookies carry the Anchor session the endorsement derives from, so a
-  // cookie clear must take the derived credentials with it. The store is
-  // unlinkable and cross-site (see the header), so it is cleared as a unit,
-  // ignoring the per-key matcher and time range.
   if (remove_mask & StoragePartition::REMOVE_DATA_MASK_COOKIES) {
     ClearAndReset();
   }
@@ -118,7 +219,6 @@ void MoleClientHolder::OnStorageKeyDataCleared(
 
 base::ImportantFileWriter::BackgroundDataProducerCallback
 MoleClientHolder::GetSerializedDataProducerForBackgroundSequence() {
-  // Snapshot the durable state on the UI thread; push the bytes on the backend.
   rust::Vec<uint8_t> blob = client_->serialize_state();
   std::string data(blob.begin(), blob.end());
   return base::BindOnce(
@@ -130,8 +230,6 @@ MoleClientHolder::GetSerializedDataProducerForBackgroundSequence() {
 
 void MoleClientHolder::OnLoaded(std::optional<std::vector<uint8_t>> bytes) {
   if (bytes && !bytes->empty()) {
-    // A corrupt blob leaves the fresh client untouched (restore_state returns
-    // false without mutating), which self-heals rather than wedging.
     client_->restore_state(
         rust::Slice<const uint8_t>(bytes->data(), bytes->size()));
   }

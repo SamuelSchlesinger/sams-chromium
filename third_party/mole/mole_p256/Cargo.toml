@@ -1,0 +1,27 @@
+[package]
+name = "mole-p256"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "Apache-2.0"
+readme = "README.md"
+description = "The P-256 group, hashing, and randomness beneath the MOLE protocol crates ec-ihat and ec-act"
+publish = false
+
+[features]
+default = ["rustcrypto", "std"]
+rustcrypto = ["dep:p256", "dep:sha2", "dep:getrandom"]
+std = ["p256?/std", "p256?/precomputed-tables", "getrandom?/std"]
+wasm_js = ["getrandom?/wasm_js"]
+boringssl = ["dep:bssl-sys"]
+backend-parity = ["rustcrypto", "boringssl"]
+
+[dependencies]
+subtle = { version = "2.6", default-features = false }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "hash2curve", "alloc"], optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
+getrandom = { version = "0.4", optional = true }
+bssl-sys = { version = "0.1.0", optional = true }
+
+[dev-dependencies]
+hex = "0.4"

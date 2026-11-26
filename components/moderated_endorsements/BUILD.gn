@@ -5,21 +5,23 @@
 import("//build/rust/rust_static_library.gni")
 import("//testing/test.gni")
 
-# The MoLE Client as a sans-I/O state machine over the cryptographic stack in
-# //third_party/mole, exposed to C++ through cxx. All networking stays with
-# the C++ caller; this crate turns received bytes into the bytes and header
-# values of the next exchange, and owns the per-policy ACT Credential pool.
+# The MOLE Client as a sans-I/O state machine over the spec-compliant
+# cryptographic and wire stack in //third_party/mole, exposed to C++ through
+# cxx. All networking stays with the C++ caller; this crate validates directory
+# configurations against committed policy invariants, builds and consumes
+# `draft-jms-mole-protocols-01` / `draft-jms-mole-http-transport-01` payloads,
+# and tracks Usable credentials plus write-ahead Spent/Held recovery state.
 rust_static_library("mole_ffi") {
   allow_unsafe = true  # Needed for FFI that underpins the `cxx` crate.
   crate_root = "mole_ffi.rs"
   sources = [ "mole_ffi.rs" ]
   cxx_bindings = [ "mole_ffi.rs" ]
-  edition = "2021"
+  edition = "2024"
   deps = [
     "//third_party/mole:mole_core",
-    "//third_party/mole/act_boring",
-    "//third_party/mole/ihat_boring",
-    "//third_party/mole/sigma_boring",
+    "//third_party/mole/ec_act",
+    "//third_party/mole/ec_ihat",
+    "//third_party/mole/mole_p256",
     "//third_party/rust/serde_json/v1:lib",
   ]
 }
@@ -34,8 +36,8 @@ source_set("unit_tests") {
   ]
 }
 
-# Standalone runner so the protocol tests build without the whole
-# components_unittests world.
+# Standalone runner so the protocol and cryptographic vector tests build
+# without the whole components_unittests graph.
 test("mole_unittests") {
   deps = [
     ":unit_tests",
@@ -43,16 +45,12 @@ test("mole_unittests") {
     "//base/test:run_all_unittests",
     "//base/test:test_support",
     "//testing/gtest",
-
-    # Keeps the sigma_boring differential tests in the build graph so they are
-    # built and reachable (temporary wiring while that crate is standalone).
-    "//third_party/mole/act_boring:act_boring_unittests",
-    "//third_party/mole/ihat_boring:ihat_boring_unittests",
-    "//third_party/mole/sigma_boring:sigma_boring_unittests",
+    "//third_party/mole:mole_core_unittests",
+    "//third_party/mole/ec_act:ec_act_unittests",
+    "//third_party/mole/ec_ihat:ec_ihat_unittests",
+    "//third_party/mole/mole_p256:mole_p256_unittests",
   ]
 
-  # Keeps the standalone demo servers in the build graph so they are reachable
-  # (they run alongside content_shell; see //third_party/mole/mole_demo).
   data_deps = [
     "//third_party/mole/mole_demo:mole_demo_anchor",
     "//third_party/mole/mole_demo:mole_demo_moderator",

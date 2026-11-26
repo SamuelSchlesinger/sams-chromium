@@ -1,375 +1,489 @@
-//! The MoLE protocol messages.
-//!
-//! The transport-level structures come from draft-jms-mole-http-transport and
-//! draft-jms-mole-protocols. The `Ihat*` structures refine the opaque bodies
-//! for endorsement type 0x0002 and the `Act*` structures for credential type
-//! 0x0001; where the drafts leave contents undefined (the ACT challenge, the
-//! grant session correlation) the definitions here are the ones this
-//! instantiation proposes — see the practicalities notes in the
-//! internet-drafts repository.
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
 
+//! Direct (unwrapped) binary protocol messages per `draft-jms-mole-protocols-01`:
+//! - EC-IHAT batched grants (`GrantRequest`, `GrantCommitments`, `GrantChallenges`, `GrantResponses`)
+//! - 32-byte `RedemptionChallenge` (§4.1)
+//! - EC-ACT `IssuanceRequest`, `IssuanceResponse`, `Challenge`, `PresentationAndUpdate`,
+//!   `Update`, and 96-byte `RecoveryHandle` (§5.2)
+
+use crate::act::compute_recovery_handle;
 use crate::wire::{
-    get_fixed, get_opaque_seq, get_opaque_v, get_optional, get_u16, get_u64, get_u8,
-    put_opaque_seq, put_opaque_v, put_optional, put_u16, put_u64, put_u8, Wire, WireError,
+    Wire, WireError, get_fixed, get_opaque_slice, get_u8, get_u16, get_u64, put_opaque_v, put_u8,
+    put_u16, put_u64,
 };
+use crate::{MAX_CREDENTIAL_CONTEXT_LEN, challenge_digest};
 
-macro_rules! wire_struct {
-    (
-        $(#[$meta:meta])*
-        struct $name:ident {
-            $($(#[$fmeta:meta])* $field:ident : $kind:tt),* $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub struct $name {
-            $($(#[$fmeta])* pub $field: wire_struct!(@ty $kind),)*
-        }
+fn encode_fixed_batch<const N: usize, T>(
+    prefix_session_id: Option<&[u8; 32]>,
+    items: &[T],
+    empty_err: &'static str,
+    to_bytes: impl Fn(&T) -> [u8; N],
+) -> Result<Vec<u8>, WireError> {
+    if items.is_empty() {
+        return Err(WireError::Malformed(empty_err));
+    }
+    let mut raw = Vec::with_capacity(items.len() * N);
+    for item in items {
+        raw.extend_from_slice(&to_bytes(item));
+    }
+    let mut out = Vec::with_capacity(prefix_session_id.map_or(0, |s| s.len()) + 8 + raw.len());
+    if let Some(sid) = prefix_session_id {
+        out.extend_from_slice(sid);
+    }
+    put_opaque_v(&mut out, &raw)?;
+    Ok(out)
+}
 
-        impl Wire for $name {
-            fn encode(&self, out: &mut Vec<u8>) {
-                $(wire_struct!(@put out, self.$field, $kind);)*
-            }
-
-            fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
-                Ok($name {
-                    $($field: wire_struct!(@get buf, $kind)?,)*
-                })
-            }
-        }
-    };
-
-    (@ty u8) => { u8 };
-    (@ty u16) => { u16 };
-    (@ty u64) => { u64 };
-    (@ty opaque_v) => { Vec<u8> };
-    (@ty opaque_seq) => { Vec<Vec<u8>> };
-    (@ty digest32) => { [u8; 32] };
-
-    (@put $out:ident, $v:expr, u8) => { put_u8($out, $v) };
-    (@put $out:ident, $v:expr, u16) => { put_u16($out, $v) };
-    (@put $out:ident, $v:expr, u64) => { put_u64($out, $v) };
-    (@put $out:ident, $v:expr, opaque_v) => { put_opaque_v($out, &$v) };
-    (@put $out:ident, $v:expr, opaque_seq) => { put_opaque_seq($out, &$v) };
-    (@put $out:ident, $v:expr, digest32) => { $out.extend_from_slice(&$v) };
-
-    (@get $buf:ident, u8) => { get_u8($buf) };
-    (@get $buf:ident, u16) => { get_u16($buf) };
-    (@get $buf:ident, u64) => { get_u64($buf) };
-    (@get $buf:ident, opaque_v) => { get_opaque_v($buf) };
-    (@get $buf:ident, opaque_seq) => { get_opaque_seq($buf) };
-    (@get $buf:ident, digest32) => { get_fixed::<32>($buf) };
+fn decode_fixed_batch<const N: usize, T, E>(
+    buf: &mut &[u8],
+    len_err: &'static str,
+    crypto_err: &'static str,
+    from_slice: impl Fn(&[u8]) -> Result<T, E>,
+) -> Result<Vec<T>, WireError> {
+    let raw = get_opaque_slice(buf)?;
+    if raw.is_empty() || raw.len() % N != 0 {
+        return Err(WireError::Malformed(len_err));
+    }
+    raw.as_chunks::<N>()
+        .0
+        .iter()
+        .map(|chunk| from_slice(chunk.as_slice()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| WireError::Malformed(crypto_err))
 }
 
 // ---------------------------------------------------------------------------
-// Transport-level messages (draft-jms-mole-http-transport / -protocols)
+// EC-IHAT Batch Grant (`draft-jms-mole-protocols-01` §4.4.2)
 // ---------------------------------------------------------------------------
 
-wire_struct! {
-    /// Client -> Anchor grant exchange request body
-    /// (`application/mole-endorsement-request`).
-    struct EndorsementRequest {
-        endorsement_type: u16,
-        body: opaque_v,
-    }
+/// `struct { uint16 count; } GrantRequest;`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrantRequest {
+    /// Requested number of Endorsements (`count >= 1`).
+    pub count: u16,
 }
 
-wire_struct! {
-    /// Anchor -> Client grant exchange response body
-    /// (`application/mole-endorsement-response`).
-    struct EndorsementResponse {
-        endorsement_type: u16,
-        body: opaque_v,
-    }
+impl GrantRequest {
+    /// Encoded length (always 2 bytes).
+    pub const LENGTH: usize = 2;
 }
 
-wire_struct! {
-    /// Anchor -> Client challenge (`WWW-Authenticate: Mole`, realm "anchor").
-    struct EndorsementChallenge {
-        endorsement_type: u16,
-        anchor_context: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// Moderator -> Client challenge for Redeem & Issue: names the endorsement
-    /// type it accepts, with the type-specific challenge (for IHAT, the
-    /// accepted Anchor key set) inside.
-    struct ModeratorChallenge {
-        endorsement_type: u16,
-        challenge: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// Moderator -> Client challenge for Presentation: names the credential
-    /// type, with the type-specific challenge (for ACT, the policy context and
-    /// charge) inside.
-    struct CredentialChallenge {
-        credential_type: u16,
-        challenge: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// Client -> Moderator, Redeem & Issue
-    /// (`Authorization: Mole credential-request=`): an endorsement redemption
-    /// together with a credential issuance request.
-    struct CredentialRequest {
-        endorsement_type: u16,
-        endorsement_presentation: opaque_v,
-        credential_type: u16,
-        issuance_request: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// Moderator -> Client, Redeem & Issue
-    /// (`Mole-Credential: response=`).
-    struct CredentialResponse {
-        credential_type: u16,
-        issuance_response: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// Client -> Moderator, Presentation
-    /// (`Authorization: Mole presentation=`).
-    struct CredentialPresentation {
-        credential_type: u16,
-        presentation_and_update: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// Moderator -> Client after a presentation
-    /// (inside [`OptionalCredentialUpdate`], `Mole-Credential: update=`).
-    struct CredentialUpdate {
-        credential_type: u16,
-        update_response: opaque_v,
-    }
-}
-
-/// `optional<CredentialUpdate>`: present when the Credential remains usable
-/// after presentation, absent when the Moderator intentionally consumes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OptionalCredentialUpdate {
-    pub update: Option<CredentialUpdate>,
-}
-
-impl Wire for OptionalCredentialUpdate {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_optional(out, &self.update);
+impl Wire for GrantRequest {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        if self.count == 0 {
+            return Err(WireError::Malformed("GrantRequest count must be >= 1"));
+        }
+        put_u16(out, self.count);
+        Ok(())
     }
 
     fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
-        Ok(OptionalCredentialUpdate {
-            update: get_optional(buf)?,
+        let count = get_u16(buf)?;
+        if count == 0 {
+            return Err(WireError::Malformed("GrantRequest count must be >= 1"));
+        }
+        Ok(Self { count })
+    }
+}
+
+/// `struct { opaque session_id[32]; CommitMessage commitments<V>; } GrantCommitments;`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantCommitments {
+    /// Fresh 32-byte Anchor batch session identifier.
+    pub session_id: [u8; 32],
+    /// Ordered `CommitMessage` items (`1 <= len <= count`).
+    pub commitments: Vec<ec_ihat::CommitMessage>,
+}
+
+impl Wire for GrantCommitments {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        out.extend_from_slice(&encode_fixed_batch(
+            Some(&self.session_id),
+            &self.commitments,
+            "GrantCommitments must contain >= 1 commitment",
+            ec_ihat::CommitMessage::to_bytes,
+        )?);
+        Ok(())
+    }
+
+    fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
+        let session_id = get_fixed::<32>(buf)?;
+        let commitments = decode_fixed_batch::<{ <ec_ihat::CommitMessage>::LENGTH }, _, _>(
+            buf,
+            "GrantCommitments vector length invalid",
+            "malformed EC-IHAT CommitMessage",
+            ec_ihat::CommitMessage::from_bytes,
+        )?;
+        Ok(Self {
+            session_id,
+            commitments,
+        })
+    }
+}
+
+/// `struct { opaque session_id[32]; ChallengeMessage challenges<V>; } GrantChallenges;`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantChallenges {
+    /// Correlating 32-byte Anchor batch session identifier.
+    pub session_id: [u8; 32],
+    /// Ordered `ChallengeMessage` items matching `GrantCommitments`.
+    pub challenges: Vec<ec_ihat::ChallengeMessage>,
+}
+
+impl Wire for GrantChallenges {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        out.extend_from_slice(&encode_fixed_batch(
+            Some(&self.session_id),
+            &self.challenges,
+            "GrantChallenges must contain >= 1 challenge",
+            ec_ihat::ChallengeMessage::to_bytes,
+        )?);
+        Ok(())
+    }
+
+    fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
+        let session_id = get_fixed::<32>(buf)?;
+        let challenges = decode_fixed_batch::<{ <ec_ihat::ChallengeMessage>::LENGTH }, _, _>(
+            buf,
+            "GrantChallenges vector length invalid",
+            "malformed EC-IHAT ChallengeMessage",
+            ec_ihat::ChallengeMessage::from_bytes,
+        )?;
+        Ok(Self {
+            session_id,
+            challenges,
+        })
+    }
+}
+
+/// `struct { ResponseMessage responses<V>; } GrantResponses;`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantResponses {
+    /// Ordered `ResponseMessage` items matching `GrantChallenges`.
+    pub responses: Vec<ec_ihat::ResponseMessage>,
+}
+
+impl Wire for GrantResponses {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        out.extend_from_slice(&encode_fixed_batch(
+            None,
+            &self.responses,
+            "GrantResponses must contain >= 1 response",
+            ec_ihat::ResponseMessage::to_bytes,
+        )?);
+        Ok(())
+    }
+
+    fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
+        let responses = decode_fixed_batch::<{ <ec_ihat::ResponseMessage>::LENGTH }, _, _>(
+            buf,
+            "GrantResponses vector length invalid",
+            "malformed EC-IHAT ResponseMessage",
+            ec_ihat::ResponseMessage::from_bytes,
+        )?;
+        Ok(Self { responses })
+    }
+}
+
+/// Disambiguates an incoming EC-IHAT grant POST body (`application/mole-endorsement-request; type=0002`):
+/// Step 1 (`GrantRequest`) is 2 bytes; Step 2 (`GrantChallenges`) is `>= 65` bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EcIhatGrantPost {
+    /// Step 1: initial batch request.
+    Request(GrantRequest),
+    /// Step 2: blinded challenge submission.
+    Challenges(GrantChallenges),
+}
+
+impl EcIhatGrantPost {
+    /// Parses a raw EC-IHAT grant POST body.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, WireError> {
+        if bytes.len() == GrantRequest::LENGTH {
+            Ok(Self::Request(GrantRequest::from_bytes(bytes)?))
+        } else {
+            Ok(Self::Challenges(GrantChallenges::from_bytes(bytes)?))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Endorsement Redemption (`draft-jms-mole-protocols-01` §4.1)
+// ---------------------------------------------------------------------------
+
+/// `struct { opaque redemption_context[32]; } RedemptionChallenge;`
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RedemptionChallenge {
+    /// Moderator-constructed 32-byte redemption context.
+    pub redemption_context: [u8; 32],
+}
+
+impl RedemptionChallenge {
+    /// Exact encoded length (32 bytes).
+    pub const LENGTH: usize = 32;
+
+    /// Computes `challenge_digest = SHA-256(moderator_challenge)`.
+    pub fn digest(&self) -> [u8; 32] {
+        challenge_digest(&self.redemption_context)
+    }
+}
+
+impl Wire for RedemptionChallenge {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        out.extend_from_slice(&self.redemption_context);
+        Ok(())
+    }
+
+    fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
+        Ok(Self {
+            redemption_context: get_fixed::<32>(buf)?,
         })
     }
 }
 
 // ---------------------------------------------------------------------------
-// IHAT endorsement protocol (endorsement type 0x0002)
+// EC-ACT Credential Messages (`draft-jms-mole-protocols-01` §5.2)
 // ---------------------------------------------------------------------------
 
-/// The IHAT `Challenge`: the Anchor public keys the Moderator accepts, in the
-/// order published in its configuration (OR-proof branches match keys by
-/// position).
+/// `struct { uint8 truncated_key_id; opaque credential_context<V>; IssueRequestMessage request; } IssuanceRequest;`
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IhatChallenge {
-    /// SEC1-compressed P-256 points, 33 bytes each.
-    pub keys: Vec<[u8; 33]>,
+pub struct EcActIssuanceRequest {
+    /// Last byte of `key_id = SHA-256(SerializeElement(pkM))`.
+    pub truncated_key_id: u8,
+    /// Configured `credential_context` (`<= 65534` bytes).
+    pub credential_context: Vec<u8>,
+    /// Underlying EC-ACT `IssueRequestMessage` (129 bytes).
+    pub request: ec_act::IssueRequestMessage,
 }
 
-impl Wire for IhatChallenge {
-    fn encode(&self, out: &mut Vec<u8>) {
-        let mut body = Vec::with_capacity(self.keys.len() * 33);
-        for key in &self.keys {
-            body.extend_from_slice(key);
+impl EcActIssuanceRequest {
+    /// Encodes `EcActIssuanceRequest`.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, WireError> {
+        if self.credential_context.len() > MAX_CREDENTIAL_CONTEXT_LEN {
+            return Err(WireError::OutOfRange);
         }
-        put_opaque_v(out, &body);
+        let req_bytes = self.request.to_bytes();
+        let mut out = Vec::with_capacity(1 + 4 + self.credential_context.len() + req_bytes.len());
+        put_u8(&mut out, self.truncated_key_id);
+        put_opaque_v(&mut out, &self.credential_context)?;
+        out.extend_from_slice(&req_bytes);
+        Ok(out)
+    }
+
+    /// Splits `(truncated_key_id, credential_context, raw_request_bytes)` before
+    /// `Params` selection (`draft-jms-mole-protocols-01` §5.2.2 step 1).
+    pub fn split_header(bytes: &[u8]) -> Result<(u8, Vec<u8>, &[u8; 129]), WireError> {
+        let mut cur = bytes;
+        let truncated_key_id = get_u8(&mut cur)?;
+        let credential_context = get_opaque_slice(&mut cur)?;
+        if credential_context.len() > MAX_CREDENTIAL_CONTEXT_LEN {
+            return Err(WireError::OutOfRange);
+        }
+        let Some((req_arr, trailing)) = cur.split_first_chunk::<{ <ec_act::IssueRequestMessage>::LENGTH }>()
+        else {
+            return Err(WireError::UnexpectedEof);
+        };
+        if !trailing.is_empty() {
+            return Err(WireError::TrailingBytes);
+        }
+        Ok((truncated_key_id, credential_context.to_vec(), req_arr))
+    }
+
+    /// Decodes `EcActIssuanceRequest` against `params`.
+    pub fn from_bytes(params: &ec_act::Params, bytes: &[u8]) -> Result<Self, WireError> {
+        let (truncated_key_id, credential_context, req_arr) = Self::split_header(bytes)?;
+        let request = ec_act::IssueRequestMessage::from_bytes(params, req_arr)
+            .map_err(|_| WireError::Malformed("invalid EC-ACT IssueRequestMessage"))?;
+        Ok(Self {
+            truncated_key_id,
+            credential_context,
+            request,
+        })
+    }
+}
+
+/// `struct { IssueResponseMessage response; } IssuanceResponse;`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EcActIssuanceResponse {
+    /// Underlying EC-ACT `IssueResponseMessage` (137 bytes).
+    pub response: ec_act::IssueResponseMessage,
+}
+
+impl EcActIssuanceResponse {
+    /// Encodes `EcActIssuanceResponse`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.response.to_bytes().to_vec()
+    }
+
+    /// Decodes `EcActIssuanceResponse` against `params`.
+    pub fn from_bytes(params: &ec_act::Params, bytes: &[u8]) -> Result<Self, WireError> {
+        let response = ec_act::IssueResponseMessage::from_bytes(params, bytes)
+            .map_err(|_| WireError::Malformed("invalid EC-ACT IssueResponseMessage"))?;
+        Ok(Self { response })
+    }
+}
+
+/// `struct { uint64 spend_amount; uint64 max_top_up; opaque credential_context<V>; opaque request_context<V>; } Challenge;`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EcActChallenge {
+    /// Required spend amount `s`.
+    pub spend_amount: u64,
+    /// Maximum offered top-up `a`.
+    pub max_top_up: u64,
+    /// Credential context (`<= 65534` bytes).
+    pub credential_context: Vec<u8>,
+    /// Policy-scoped (empty) or request-bound context bytes.
+    pub request_context: Vec<u8>,
+}
+
+impl EcActChallenge {
+    /// Computes `ctx_spend = SHA-256(credential_challenge)` (`draft-jms-mole-protocols-01` §5.2.3.1).
+    pub fn ctx_spend(&self) -> Result<[u8; 32], WireError> {
+        Ok(challenge_digest(&self.to_bytes()?))
+    }
+}
+
+impl Wire for EcActChallenge {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        if self.credential_context.len() > MAX_CREDENTIAL_CONTEXT_LEN {
+            return Err(WireError::OutOfRange);
+        }
+        put_u64(out, self.spend_amount);
+        put_u64(out, self.max_top_up);
+        put_opaque_v(out, &self.credential_context)?;
+        put_opaque_v(out, &self.request_context)?;
+        Ok(())
     }
 
     fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
-        let body = get_opaque_v(buf)?;
-        if body.len() % 33 != 0 {
-            return Err(WireError::Malformed("IHAT key set not a multiple of 33"));
+        let spend_amount = get_u64(buf)?;
+        let max_top_up = get_u64(buf)?;
+        let credential_context = get_opaque_slice(buf)?;
+        if credential_context.len() > MAX_CREDENTIAL_CONTEXT_LEN {
+            return Err(WireError::OutOfRange);
         }
-        let keys = body.as_chunks::<33>().0.to_vec();
-        Ok(IhatChallenge { keys })
+        let request_context = get_opaque_slice(buf)?;
+        Ok(Self {
+            spend_amount,
+            max_top_up,
+            credential_context: credential_context.to_vec(),
+            request_context: request_context.to_vec(),
+        })
     }
 }
 
-wire_struct! {
-    /// The IHAT `Presentation`: the output of `Present` (an ihat-rs
-    /// `Presentation` in its wire encoding), carried in the
-    /// `endorsement_presentation` field of a [`CredentialRequest`].
-    struct IhatPresentation {
-        bytes: opaque_v,
-    }
-}
-
-/// The bodies of the two IHAT grant exchanges. The Anchor holds state between
-/// them, so the second exchange must be correlated with the first: the Anchor
-/// returns an opaque `session_id` in its first response and the Client echoes
-/// it in its second request. (The drafts flag this correlation as an open
-/// TODO; a session identifier at the endorsement-protocol layer is the
-/// resolution this instantiation proposes.)
+/// `struct { opaque key_id[32]; SpendMessage spend; } PresentationAndUpdate;`
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IhatGrantRequest {
-    /// First exchange: the ihat-rs `SignatureRequest` wire bytes.
-    Step1 { signature_request: Vec<u8> },
-    /// Second exchange: the session from step 1 and the ihat-rs
-    /// `ProofRequest` wire bytes.
-    Step2 {
-        session_id: Vec<u8>,
-        proof_request: Vec<u8>,
-    },
+pub struct EcActPresentationAndUpdate {
+    /// Full 32-byte `key_id = SHA-256(SerializeElement(pkM))`.
+    pub key_id: [u8; 32],
+    /// Underlying EC-ACT `SpendMessage`.
+    pub spend: ec_act::SpendMessage,
 }
 
-impl Wire for IhatGrantRequest {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            IhatGrantRequest::Step1 { signature_request } => {
-                put_u8(out, 1);
-                put_opaque_v(out, signature_request);
-            }
-            IhatGrantRequest::Step2 {
-                session_id,
-                proof_request,
-            } => {
-                put_u8(out, 2);
-                put_opaque_v(out, session_id);
-                put_opaque_v(out, proof_request);
-            }
+impl EcActPresentationAndUpdate {
+    /// Encodes `EcActPresentationAndUpdate`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let spend_bytes = self.spend.to_bytes();
+        let mut out = Vec::with_capacity(32 + spend_bytes.len());
+        out.extend_from_slice(&self.key_id);
+        out.extend_from_slice(&spend_bytes);
+        out
+    }
+
+    /// Splits `(key_id, spend_slice)` so the Moderator can select active key
+    /// `Params` before decoding `SpendMessage` (`draft-jms-mole-protocols-01` §5.2.3.2 step 1).
+    pub fn split_key_id(bytes: &[u8]) -> Result<([u8; 32], &[u8]), WireError> {
+        match bytes.split_first_chunk::<32>() {
+            Some((&key_id, spend_slice)) if !spend_slice.is_empty() => Ok((key_id, spend_slice)),
+            _ => Err(WireError::UnexpectedEof),
         }
+    }
+
+    /// Decodes `EcActPresentationAndUpdate` against `params`.
+    pub fn from_bytes(params: &ec_act::Params, bytes: &[u8]) -> Result<Self, WireError> {
+        let (key_id, spend_slice) = Self::split_key_id(bytes)?;
+        let spend = ec_act::SpendMessage::from_bytes(params, spend_slice)
+            .map_err(|_| WireError::Malformed("invalid EC-ACT SpendMessage"))?;
+        Ok(Self { key_id, spend })
+    }
+
+    /// Computes the 96-byte `RecoveryHandle` for this presentation.
+    pub fn recovery_handle(&self) -> RecoveryHandle {
+        let raw = self.to_bytes();
+        let nf = self.spend.nullifier();
+        RecoveryHandle::from_array(compute_recovery_handle(&self.key_id, &nf, &raw))
+    }
+}
+
+/// `struct { RefundMessage refund; } Update;`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EcActUpdate {
+    /// Underlying EC-ACT `RefundMessage` (137 bytes).
+    pub refund: ec_act::RefundMessage,
+}
+
+impl EcActUpdate {
+    /// Encodes `EcActUpdate` (non-empty).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.refund.to_bytes().to_vec()
+    }
+
+    /// Decodes `EcActUpdate` against `params`.
+    pub fn from_bytes(params: &ec_act::Params, bytes: &[u8]) -> Result<Self, WireError> {
+        let refund = ec_act::RefundMessage::from_bytes(params, bytes)
+            .map_err(|_| WireError::Malformed("invalid EC-ACT RefundMessage"))?;
+        Ok(Self { refund })
+    }
+}
+
+/// 96-byte EC-ACT recovery / signoff handle (`draft-jms-mole-protocols-01` §5.2.5):
+/// `key_id[32] || SerializeScalar(spend.k)[32] || SHA-256(PresentationAndUpdate)[32]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecoveryHandle {
+    /// 32-byte `key_id`.
+    pub key_id: [u8; 32],
+    /// 32-byte big-endian encoding of `spend.k`.
+    pub nullifier: [u8; 32],
+    /// 32-byte SHA-256 digest of the `PresentationAndUpdate` octets.
+    pub presentation_sha256: [u8; 32],
+}
+
+impl RecoveryHandle {
+    /// Exact encoded length (96 bytes).
+    pub const LENGTH: usize = 96;
+
+    /// Constructs from a 96-byte array.
+    pub fn from_array(bytes: [u8; Self::LENGTH]) -> Self {
+        let ([key_id, nullifier, presentation_sha256], _) = bytes.as_chunks::<32>() else {
+            unreachable!()
+        };
+        Self {
+            key_id: *key_id,
+            nullifier: *nullifier,
+            presentation_sha256: *presentation_sha256,
+        }
+    }
+
+    /// Encodes to a 96-byte array.
+    pub fn to_array(&self) -> [u8; Self::LENGTH] {
+        let mut out = [0u8; Self::LENGTH];
+        out[..32].copy_from_slice(&self.key_id);
+        out[32..64].copy_from_slice(&self.nullifier);
+        out[64..96].copy_from_slice(&self.presentation_sha256);
+        out
+    }
+}
+
+impl Wire for RecoveryHandle {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        out.extend_from_slice(&self.to_array());
+        Ok(())
     }
 
     fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
-        match get_u8(buf)? {
-            1 => Ok(IhatGrantRequest::Step1 {
-                signature_request: get_opaque_v(buf)?,
-            }),
-            2 => Ok(IhatGrantRequest::Step2 {
-                session_id: get_opaque_v(buf)?,
-                proof_request: get_opaque_v(buf)?,
-            }),
-            _ => Err(WireError::Malformed("unknown IHAT grant step")),
-        }
-    }
-}
-
-/// The bodies of the two IHAT grant responses, mirroring
-/// [`IhatGrantRequest`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IhatGrantResponse {
-    /// First exchange: a fresh session identifier and the ihat-rs `Signature`
-    /// wire bytes.
-    Step1 {
-        session_id: Vec<u8>,
-        signature: Vec<u8>,
-    },
-    /// Second exchange: the ihat-rs `Proof` wire bytes.
-    Step2 { proof: Vec<u8> },
-}
-
-impl Wire for IhatGrantResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            IhatGrantResponse::Step1 {
-                session_id,
-                signature,
-            } => {
-                put_u8(out, 1);
-                put_opaque_v(out, session_id);
-                put_opaque_v(out, signature);
-            }
-            IhatGrantResponse::Step2 { proof } => {
-                put_u8(out, 2);
-                put_opaque_v(out, proof);
-            }
-        }
-    }
-
-    fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
-        match get_u8(buf)? {
-            1 => Ok(IhatGrantResponse::Step1 {
-                session_id: get_opaque_v(buf)?,
-                signature: get_opaque_v(buf)?,
-            }),
-            2 => Ok(IhatGrantResponse::Step2 {
-                proof: get_opaque_v(buf)?,
-            }),
-            _ => Err(WireError::Malformed("unknown IHAT grant step")),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ACT credential protocol (credential type 0x0001)
-// ---------------------------------------------------------------------------
-
-wire_struct! {
-    /// The ACT `Challenge`. The drafts leave its contents undefined ("must
-    /// express the predicate and the charged amount"); this instantiation
-    /// defines it as the policy identifier plus the two public amounts of an
-    /// ACT spend:
-    ///
-    /// * `charge` — the amount `s` the Client must prove it can spend. The
-    ///   predicate the Moderator learns is "new balance `c - s + a >= 0`".
-    /// * `topup` — the Moderator-authorized top-up `a`, normally 0.
-    ///
-    /// Both amounts are policy-wide constants: varying them per Client would
-    /// partition the anonymity set.
-    struct ActChallenge {
-        policy_context: opaque_v,
-        charge: u64,
-        topup: u64,
-    }
-}
-
-wire_struct! {
-    /// The ACT `IssuanceRequest` (draft-jms-mole-protocols): a truncated key
-    /// identifier and a batch of ACT issuance request messages.
-    ///
-    /// ACT Credentials are linear — a spend must complete before the refund
-    /// yields the successor — so a Client that presents concurrently needs a
-    /// pool of independent Credentials. One endorsement redemption therefore
-    /// issues a whole batch: the policy fixes the batch size (every Client
-    /// requests exactly `issuance-batch` tokens, keeping issuance uniform),
-    /// and the Moderator's per-redemption grant is `issuance-batch *
-    /// initial-credits`.
-    struct ActIssuanceRequest {
-        truncated_key_id: u8,
-        requests: opaque_seq,
-    }
-}
-
-wire_struct! {
-    /// The ACT `IssuanceResponse`: one ACT issuance response message per
-    /// request, in request order.
-    struct ActIssuanceResponse {
-        responses: opaque_seq,
-    }
-}
-
-wire_struct! {
-    /// The ACT `PresentationAndUpdate` (draft-jms-mole-protocols): the digest
-    /// of the challenge being answered, the full key identifier, and an ACT
-    /// spend proof message.
-    struct ActPresentationAndUpdate {
-        challenge_digest: digest32,
-        key_id: digest32,
-        spend_proof: opaque_v,
-    }
-}
-
-wire_struct! {
-    /// The ACT `Update`: an ACT refund message. Finalizing it yields the
-    /// replacement Credential.
-    struct ActUpdate {
-        refund: opaque_v,
+        Ok(Self::from_array(get_fixed::<96>(buf)?))
     }
 }
 
@@ -377,108 +491,43 @@ wire_struct! {
 mod tests {
     use super::*;
 
-    fn round_trip<T: Wire + PartialEq + std::fmt::Debug>(value: &T) {
-        let bytes = value.to_bytes();
-        let decoded = T::from_bytes(&bytes).expect("decode");
-        assert_eq!(&decoded, value);
-        assert_eq!(decoded.to_bytes(), bytes, "canonical re-encode");
+    #[test]
+    fn grant_request_and_disambiguation() {
+        let req = GrantRequest { count: 4 };
+        let bytes = req.to_bytes().unwrap();
+        assert_eq!(bytes, vec![0x00, 0x04]);
+        assert_eq!(EcIhatGrantPost::from_bytes(&bytes).unwrap(), EcIhatGrantPost::Request(req));
+        assert!(GrantRequest { count: 0 }.to_bytes().is_err());
+        assert!(GrantRequest::from_bytes(&[0, 0]).is_err());
     }
 
     #[test]
-    fn transport_messages_round_trip() {
-        round_trip(&EndorsementRequest {
-            endorsement_type: 0x0002,
-            body: vec![1, 2, 3],
-        });
-        round_trip(&ModeratorChallenge {
-            endorsement_type: 0x0002,
-            challenge: vec![9; 100],
-        });
-        round_trip(&CredentialChallenge {
-            credential_type: 0x0001,
-            challenge: vec![],
-        });
-        round_trip(&CredentialRequest {
-            endorsement_type: 0x0002,
-            endorsement_presentation: vec![7; 500],
-            credential_type: 0x0001,
-            issuance_request: vec![8; 130],
-        });
-        round_trip(&CredentialResponse {
-            credential_type: 0x0001,
-            issuance_response: vec![4; 162],
-        });
-        round_trip(&CredentialPresentation {
-            credential_type: 0x0001,
-            presentation_and_update: vec![5; 700],
-        });
-        round_trip(&OptionalCredentialUpdate { update: None });
-        round_trip(&OptionalCredentialUpdate {
-            update: Some(CredentialUpdate {
-                credential_type: 0x0001,
-                update_response: vec![6; 162],
-            }),
-        });
+    fn ec_act_challenge_field_order_matches_spec() {
+        let chal = EcActChallenge {
+            spend_amount: 1,
+            max_top_up: 2,
+            credential_context: b"ctx".to_vec(),
+            request_context: b"req".to_vec(),
+        };
+        let bytes = chal.to_bytes().unwrap();
+        // uint64(1) || uint64(2) || varint(3) || "ctx" || varint(3) || "req"
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1u64.to_be_bytes());
+        expected.extend_from_slice(&2u64.to_be_bytes());
+        expected.extend_from_slice(&[3, b'c', b't', b'x', 3, b'r', b'e', b'q']);
+        assert_eq!(bytes, expected);
+        assert_eq!(EcActChallenge::from_bytes(&bytes).unwrap(), chal);
     }
 
     #[test]
-    fn ihat_messages_round_trip() {
-        round_trip(&IhatChallenge {
-            keys: vec![[2u8; 33], [3u8; 33]],
-        });
-        round_trip(&IhatPresentation { bytes: vec![1; 64] });
-        round_trip(&IhatGrantRequest::Step1 {
-            signature_request: vec![1, 2],
-        });
-        round_trip(&IhatGrantRequest::Step2 {
-            session_id: vec![0; 16],
-            proof_request: vec![3; 32],
-        });
-        round_trip(&IhatGrantResponse::Step1 {
-            session_id: vec![0; 16],
-            signature: vec![4; 132],
-        });
-        round_trip(&IhatGrantResponse::Step2 { proof: vec![5; 96] });
-    }
-
-    #[test]
-    fn act_messages_round_trip() {
-        round_trip(&ActChallenge {
-            policy_context: b"policy-1".to_vec(),
-            charge: 1,
-            topup: 0,
-        });
-        round_trip(&ActIssuanceRequest {
-            truncated_key_id: 0xAB,
-            requests: vec![vec![1; 130]],
-        });
-        round_trip(&ActIssuanceRequest {
-            truncated_key_id: 0xAB,
-            requests: vec![vec![1; 130], vec![2; 130], vec![3; 130], vec![4; 130]],
-        });
-        round_trip(&ActIssuanceResponse {
-            responses: vec![vec![2; 162]; 4],
-        });
-        round_trip(&ActPresentationAndUpdate {
-            challenge_digest: [7; 32],
-            key_id: [8; 32],
-            spend_proof: vec![3; 800],
-        });
-        round_trip(&ActUpdate {
-            refund: vec![4; 162],
-        });
-    }
-
-    #[test]
-    fn malformed_ihat_key_set_rejected() {
-        // 34 bytes: not a multiple of 33.
-        let mut bytes = Vec::new();
-        crate::wire::put_opaque_v(&mut bytes, &[0u8; 34]);
-        assert!(IhatChallenge::from_bytes(&bytes).is_err());
-    }
-
-    #[test]
-    fn unknown_grant_step_rejected() {
-        assert!(IhatGrantRequest::from_bytes(&[3, 0]).is_err());
+    fn recovery_handle_round_trips() {
+        let h = RecoveryHandle {
+            key_id: [0x11; 32],
+            nullifier: [0x22; 32],
+            presentation_sha256: [0x33; 32],
+        };
+        let bytes = h.to_bytes().unwrap();
+        assert_eq!(bytes.len(), 96);
+        assert_eq!(RecoveryHandle::from_bytes(&bytes).unwrap(), h);
     }
 }

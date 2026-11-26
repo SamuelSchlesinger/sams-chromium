@@ -1,20 +1,23 @@
-# MoLE demo: anchor.com / antifraud.com / shoes.com / socks.com
+# MOLE demo: anchor.com / antifraud.com / shoes.com / socks.com
 
-A runnable, click-through demo of the cross-site, unlinkable endorsement flow.
+A runnable, click-through HTTPS demonstration of the cross-site, unlinkable
+endorsement and anonymous-credential flow (`draft-jms-mole-protocols-01`,
+`draft-jms-mole-http-transport-01`, `draft-ladd-mole-ec-ihat-00`, and
+`draft-schlesinger-mole-ec-act-00`).
 
-- **anchor.com** — an identity provider (Anchor). Issues one unlinkable IHAT
-  endorsement.
-- **antifraud.com** — a shared anti-fraud service (Moderator). Redeems the
-  endorsement into a pool of anonymous ACT credentials and verifies one on each
-  visit.
-- **shoes.com**, **socks.com** — two sites that both verify visitors through
-  antifraud.com.
+- **anchor.com** — an identity provider (Anchor). Grants a batch of blind
+  EC-IHAT (`0x0002`) endorsements at `POST /mole/grant`.
+- **antifraud.com** — a shared anti-fraud service (Moderator). Redeems one
+  endorsement at `POST /mole/issue` for an EC-ACT (`0x0001`) credential (`2^L`
+  range proof) and verifies/refunds presentations on `GET /gate` (plus
+  `recovery-0001` / `signoff-0001` settlement on `POST /mole/issue`).
+- **shoes.com**, **socks.com** — two distinct origins that both verify visitors
+  through `antifraud.com`.
 
-The Anchor and Moderator are standalone HTTP servers (`mole_demo_anchor`,
-`mole_demo_moderator`) built on the **same first-party BoringSSL crypto the
-browser uses** (`act_boring`/`ihat_boring`/`mole_core`), so their wire format is
-byte-compatible with `//components/moderated_endorsements` — no ristretto/P-256
-mismatch. Not production code: single-threaded, plaintext HTTP, no TLS.
+The Anchor and Moderator are standalone HTTPS servers (`mole_demo_anchor`,
+`mole_demo_moderator`) built on BoringSSL TLS (`bssl_sys`) and the same
+BoringSSL-backed crates (`mole_p256`, `ec_ihat`, `ec_act`, `mole_core`) used by
+`//components/moderated_endorsements`.
 
 ## Build + run
 
@@ -23,22 +26,21 @@ autoninja -C out/athm content_shell mole_demo_anchor mole_demo_moderator
 third_party/mole/mole_demo/run_demo.sh out/athm
 ```
 
-The script starts all four origins on localhost (mapped via
-`--host-resolver-rules`), generates the browser's key-commitment registry from
-the servers' runtime keys (`--mole-key-commitments`), enables the feature
-(`--enable-blink-features=ModeratedEndorsements`), and opens the browser at
-anchor.com.
+The script mints an ephemeral self-signed SAN certificate pinned via
+`--ignore-certificate-errors-spki-list`, starts all four HTTPS origins on
+localhost (`--host-resolver-rules`), generates the browser's key-commitment
+registry (`--mole-key-commitments`), enables `ModeratedEndorsements`, and opens
+`https://anchor.com`.
 
-## The walk-through
+## Walk-through
 
-1. **anchor.com** → "Get my endorsement" (`collect()` — same-origin).
-2. **shoes.com** → "Verify me" (`challenge("https://antifraud.com/gate")`): the
-   browser redeems the endorsement (once) and presents a credential.
-3. **socks.com** → "Verify me": presents from the *same pool*, no re-redeem.
-4. **antifraud.com** → watch the counters: **one redemption, two+ unlinkable
-   presentations**. Neither antifraud.com nor the two sites can link the visits.
-
-Try clicking "Verify me" on shoes.com *before* visiting anchor.com: it declines
-opaquely and the browser does **not** bounce you to the Anchor — that would be a
-possession oracle and a cross-site linkage. You collect an endorsement only by
-deliberately visiting the Anchor.
+1. **anchor.com** → `navigator.endorsement.collect("https://anchor.com")` runs
+   the two-round EC-IHAT batch grant at `POST https://anchor.com/mole/grant`.
+2. **shoes.com** → `navigator.endorsement.challenge("https://antifraud.com/gate")`
+   redeems one endorsement at `POST https://antifraud.com/mole/issue` (`200 OK`
+   `Mole-Credential: response-0001="..."`) and presents the issued EC-ACT
+   credential at `GET /gate` (`Mole-Credential: update-0001="..."`).
+3. **socks.com** → presents the refunded successor EC-ACT credential with zero
+   additional endorsement redemptions.
+4. **antifraud.com** → shows **one redemption** and **two+ unlinkable
+   presentations**, each exposing only a fresh one-time nullifier.

@@ -1,0 +1,24 @@
+[package]
+name = "ec-act"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "Apache-2.0"
+readme = "README.md"
+description = "EC-ACT: a keyed-verification anonymous credential with a hidden credit balance, per draft-schlesinger-mole-ec-act"
+publish = false
+
+[features]
+default = ["rustcrypto", "std"]
+rustcrypto = ["mole-p256/rustcrypto"]
+std = ["mole-p256/std"]
+wasm_js = ["mole-p256/wasm_js"]
+boringssl = ["mole-p256/boringssl"]
+backend-parity = ["rustcrypto", "boringssl", "mole-p256/backend-parity"]
+
+[dependencies]
+mole-p256 = { path = "../mole_p256", version = "0.1.0", default-features = false }
+subtle = { version = "2.6", default-features = false }
+
+[dev-dependencies]
+hex = "0.4"

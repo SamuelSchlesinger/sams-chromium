@@ -1,0 +1,36 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("mole_p256") {
+  crate_name = "mole_p256"
+  crate_root = "src/lib.rs"
+  sources = [
+    "src/backend/boringssl.rs",
+    "src/backend/boringssl/ffi.rs",
+    "src/backend/mod.rs",
+    "src/encoding.rs",
+    "src/hash.rs",
+    "src/lib.rs",
+    "src/random.rs",
+    "src/tests/encoding.rs",
+    "src/tests/mod.rs",
+    "src/tests/oracle.rs",
+    "src/tests/primitives.rs",
+    "src/zeroize.rs",
+  ]
+  inputs = [ "README.md" ]
+  test_inputs = [ "tests/vectors/derivations.rs" ]
+  edition = "2024"
+  allow_unsafe = true  # Confined to bssl_sys FFI in backend/boringssl/ffi.rs + volatile zeroize.
+  features = [ "boringssl" ]
+  rustflags = [ "--cap-lints=allow" ]
+  deps = [
+    "//third_party/boringssl:bssl_sys",
+    "//third_party/rust/subtle/v2:lib",
+  ]
+  test_deps = [ "//third_party/rust/hex/v0_4:lib" ]
+  build_native_rust_unit_tests = true
+}

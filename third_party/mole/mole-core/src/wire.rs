@@ -1,58 +1,49 @@
-//! TLS 1.3 presentation-language encoding, with the two extensions used by
-//! the MoLE drafts (draft-jms-mole-http-transport, "Presentation Language"):
-//!
-//! * **Variable-size vector length headers** (`opaque data<V>`): a QUIC
-//!   variable-length integer (RFC 9000 Section 16) length prefix, with the
-//!   additional requirement that the *minimum-size* encoding is used. A
-//!   non-minimal length encoding is rejected as malformed.
-//! * **Optional values** (`optional<T>`): a presence octet (0 or 1) followed
-//!   by the value if present. Any other presence octet is malformed.
-//!
-//! All integers are network byte order.
+// Copyright 2026 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! TLS 1.3 presentation-language primitives (`draft-jms-mole-protocols-01` §2):
+//! minimal-length RFC 9000 §16 QUIC variable-length integers (`<V>`), fixed-size
+//! arrays, and network-byte-order integer helpers.
 
 use thiserror::Error;
 
-/// An error encoding or decoding a MoLE wire value.
+/// Error encoding or decoding a MOLE binary payload.
 #[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
 pub enum WireError {
-    /// The input ended before a complete value was read.
+    /// Input ended before a complete value was read.
     #[error("unexpected end of input")]
     UnexpectedEof,
-    /// Bytes remained after a complete value was decoded.
+    /// Trailing bytes remained after decoding a complete value.
     #[error("trailing bytes after value")]
     TrailingBytes,
-    /// A variable-length integer was not minimally encoded.
+    /// A QUIC variable-length integer was not minimally encoded.
     #[error("non-minimal variable-length integer")]
     NonMinimalVarint,
-    /// A value exceeded the range its encoding can carry.
+    /// Value exceeded the permitted length or range.
     #[error("value out of range for its encoding")]
     OutOfRange,
-    /// An `optional<T>` presence octet was neither 0 nor 1.
-    #[error("malformed optional presence octet")]
-    MalformedOptional,
-    /// A field constraint was violated (e.g. a fixed-size field of the wrong
-    /// length, or an unknown discriminant).
+    /// Structural or cryptographic malformation.
     #[error("malformed value: {0}")]
     Malformed(&'static str),
 }
 
-/// Canonical byte encoding of a MoLE protocol message.
+/// Canonical byte encoding for context-free MOLE binary structures.
 pub trait Wire: Sized {
-    /// Append the canonical encoding of `self` to `out`.
-    fn encode(&self, out: &mut Vec<u8>);
+    /// Appends canonical encoding of `self` to `out`.
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError>;
 
-    /// Decode one value from the front of `buf`, advancing it past the bytes
-    /// read.
+    /// Decodes one value from the front of `buf`, advancing it.
     fn decode(buf: &mut &[u8]) -> Result<Self, WireError>;
 
-    /// The canonical byte encoding.
-    fn to_bytes(&self) -> Vec<u8> {
+    /// Encodes into a newly allocated vector.
+    fn to_bytes(&self) -> Result<Vec<u8>, WireError> {
         let mut out = Vec::new();
-        self.encode(&mut out);
-        out
+        self.encode(&mut out)?;
+        Ok(out)
     }
 
-    /// Decode from a complete slice, erroring if any bytes remain.
+    /// Decodes from `bytes`, rejecting trailing bytes.
     fn from_bytes(bytes: &[u8]) -> Result<Self, WireError> {
         let mut cursor = bytes;
         let value = Self::decode(&mut cursor)?;
@@ -64,14 +55,19 @@ pub trait Wire: Sized {
     }
 }
 
-/// Split `n` bytes off the front of `buf`, advancing it.
+/// Splits `n` bytes off the front of `buf`, advancing it.
 pub fn take<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], WireError> {
-    if buf.len() < n {
-        return Err(WireError::UnexpectedEof);
-    }
-    let (head, tail) = buf.split_at(n);
+    let (head, tail) = buf.split_at_checked(n).ok_or(WireError::UnexpectedEof)?;
     *buf = tail;
     Ok(head)
+}
+
+/// Reads a fixed-size `[u8; N]` array from `buf`.
+pub fn get_fixed<const N: usize>(buf: &mut &[u8]) -> Result<[u8; N], WireError> {
+    let slice = take(buf, N)?;
+    let mut out = [0u8; N];
+    out.copy_from_slice(slice);
+    Ok(out)
 }
 
 pub fn put_u8(out: &mut Vec<u8>, v: u8) {
@@ -87,8 +83,8 @@ pub fn put_u16(out: &mut Vec<u8>, v: u16) {
 }
 
 pub fn get_u16(buf: &mut &[u8]) -> Result<u16, WireError> {
-    let raw = take(buf, 2)?;
-    Ok(u16::from_be_bytes([raw[0], raw[1]]))
+    let raw = get_fixed::<2>(buf)?;
+    Ok(u16::from_be_bytes(raw))
 }
 
 pub fn put_u64(out: &mut Vec<u8>, v: u64) {
@@ -96,138 +92,71 @@ pub fn put_u64(out: &mut Vec<u8>, v: u64) {
 }
 
 pub fn get_u64(buf: &mut &[u8]) -> Result<u64, WireError> {
-    let raw = take(buf, 8)?;
-    let mut b = [0u8; 8];
-    b.copy_from_slice(raw);
-    Ok(u64::from_be_bytes(b))
+    let raw = get_fixed::<8>(buf)?;
+    Ok(u64::from_be_bytes(raw))
 }
 
-/// The largest value a QUIC variable-length integer can carry (2^62 - 1).
+/// Maximum value representable in a QUIC variable-length integer (`2^62 - 1`).
 pub const VARINT_MAX: u64 = (1 << 62) - 1;
 
-/// Encode a QUIC variable-length integer (RFC 9000 Section 16), always using
-/// the minimum-size encoding as the MoLE transport draft requires.
-pub fn put_varint(out: &mut Vec<u8>, v: u64) {
-    if v < 1 << 6 {
+/// Encodes `v` in minimal RFC 9000 §16 QUIC variable-length integer form.
+pub fn put_varint(out: &mut Vec<u8>, v: u64) -> Result<(), WireError> {
+    if v > VARINT_MAX {
+        return Err(WireError::OutOfRange);
+    }
+    if v < (1 << 6) {
         out.push(v as u8);
-    } else if v < 1 << 14 {
+    } else if v < (1 << 14) {
         out.extend_from_slice(&((v as u16) | 0x4000).to_be_bytes());
-    } else if v < 1 << 30 {
+    } else if v < (1 << 30) {
         out.extend_from_slice(&((v as u32) | 0x8000_0000).to_be_bytes());
     } else {
-        assert!(v <= VARINT_MAX, "varint value out of range");
         out.extend_from_slice(&(v | 0xC000_0000_0000_0000).to_be_bytes());
     }
+    Ok(())
 }
 
-/// Decode a QUIC variable-length integer, rejecting non-minimal encodings.
+/// Decodes a minimal RFC 9000 §16 QUIC variable-length integer, rejecting
+/// non-shortest encodings (`draft-jms-mole-protocols-01` §2).
 pub fn get_varint(buf: &mut &[u8]) -> Result<u64, WireError> {
-    let first = take(buf, 1)?[0];
-    let prefix = first >> 6;
-    let value = match prefix {
-        0 => u64::from(first & 0x3F),
-        1 => {
-            let rest = take(buf, 1)?;
-            let v = (u64::from(first & 0x3F) << 8) | u64::from(rest[0]);
-            if v < 1 << 6 {
-                return Err(WireError::NonMinimalVarint);
-            }
-            v
-        }
-        2 => {
-            let rest = take(buf, 3)?;
-            let v = (u64::from(first & 0x3F) << 24)
-                | (u64::from(rest[0]) << 16)
-                | (u64::from(rest[1]) << 8)
-                | u64::from(rest[2]);
-            if v < 1 << 14 {
-                return Err(WireError::NonMinimalVarint);
-            }
-            v
-        }
-        _ => {
-            let rest = take(buf, 7)?;
-            let mut v = u64::from(first & 0x3F);
-            for b in rest {
-                v = (v << 8) | u64::from(*b);
-            }
-            if v < 1 << 30 {
-                return Err(WireError::NonMinimalVarint);
-            }
-            v
-        }
+    let first = get_u8(buf)?;
+    let size = 1usize << (first >> 6);
+    let rest = take(buf, size - 1)?;
+    let mut v = u64::from(first & 0x3F);
+    for &b in rest {
+        v = (v << 8) | u64::from(b);
+    }
+    let min_val = match size {
+        1 => 0,
+        2 => 1 << 6,
+        4 => 1 << 14,
+        8 => 1 << 30,
+        _ => unreachable!(),
     };
-    Ok(value)
+    if v < min_val {
+        return Err(WireError::NonMinimalVarint);
+    }
+    Ok(v)
 }
 
-/// Encode an `opaque data<V>` vector: varint length then the bytes.
-pub fn put_opaque_v(out: &mut Vec<u8>, bytes: &[u8]) {
-    assert!(bytes.len() as u64 <= VARINT_MAX, "opaque<V> too long");
-    put_varint(out, bytes.len() as u64);
+/// Encodes `opaque x<V>` (QUIC varint byte-length prefix followed by `bytes`).
+pub fn put_opaque_v(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), WireError> {
+    let len = u64::try_from(bytes.len()).map_err(|_| WireError::OutOfRange)?;
+    put_varint(out, len)?;
     out.extend_from_slice(bytes);
+    Ok(())
 }
 
-/// Decode an `opaque data<V>` vector.
-pub fn get_opaque_v(buf: &mut &[u8]) -> Result<Vec<u8>, WireError> {
+/// Decodes `opaque x<V>` as a borrowed slice.
+pub fn get_opaque_slice<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], WireError> {
     let len = get_varint(buf)?;
     let len = usize::try_from(len).map_err(|_| WireError::OutOfRange)?;
-    Ok(take(buf, len)?.to_vec())
+    take(buf, len)
 }
 
-/// Encode a `seq<opaque<V>>`: a varint element count followed by that many
-/// `opaque<V>` values. (The drafts' presentation language has no vector-of-
-/// vectors notation; this is the encoding this instantiation proposes, used
-/// by the batched ACT issuance messages.)
-pub fn put_opaque_seq(out: &mut Vec<u8>, items: &[Vec<u8>]) {
-    assert!(items.len() as u64 <= VARINT_MAX, "seq too long");
-    put_varint(out, items.len() as u64);
-    for item in items {
-        put_opaque_v(out, item);
-    }
-}
-
-/// Decode a `seq<opaque<V>>`.
-pub fn get_opaque_seq(buf: &mut &[u8]) -> Result<Vec<Vec<u8>>, WireError> {
-    let count = get_varint(buf)?;
-    let count = usize::try_from(count).map_err(|_| WireError::OutOfRange)?;
-    // Each element costs at least its 1-byte length prefix, so a count the
-    // remaining input cannot possibly hold is rejected before allocating.
-    if count > buf.len() {
-        return Err(WireError::UnexpectedEof);
-    }
-    let mut items = Vec::with_capacity(count);
-    for _ in 0..count {
-        items.push(get_opaque_v(buf)?);
-    }
-    Ok(items)
-}
-
-/// Encode an `optional<T>`: presence octet then the value if present.
-pub fn put_optional<T: Wire>(out: &mut Vec<u8>, value: &Option<T>) {
-    match value {
-        None => out.push(0),
-        Some(v) => {
-            out.push(1);
-            v.encode(out);
-        }
-    }
-}
-
-/// Decode an `optional<T>`, rejecting presence octets other than 0 and 1.
-pub fn get_optional<T: Wire>(buf: &mut &[u8]) -> Result<Option<T>, WireError> {
-    match get_u8(buf)? {
-        0 => Ok(None),
-        1 => Ok(Some(T::decode(buf)?)),
-        _ => Err(WireError::MalformedOptional),
-    }
-}
-
-/// Decode a fixed-size byte array.
-pub fn get_fixed<const N: usize>(buf: &mut &[u8]) -> Result<[u8; N], WireError> {
-    let raw = take(buf, N)?;
-    let mut out = [0u8; N];
-    out.copy_from_slice(raw);
-    Ok(out)
+/// Decodes `opaque x<V>` into an owned `Vec<u8>`.
+pub fn get_opaque_v(buf: &mut &[u8]) -> Result<Vec<u8>, WireError> {
+    Ok(get_opaque_slice(buf)?.to_vec())
 }
 
 #[cfg(test)]
@@ -235,102 +164,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn varint_round_trips_at_boundaries() {
-        for v in [
-            0u64,
-            1,
-            63,
-            64,
-            (1 << 14) - 1,
-            1 << 14,
-            (1 << 30) - 1,
-            1 << 30,
-            VARINT_MAX,
-        ] {
-            let mut out = Vec::new();
-            put_varint(&mut out, v);
-            let mut cursor = out.as_slice();
-            assert_eq!(get_varint(&mut cursor).unwrap(), v, "value {v}");
-            assert!(cursor.is_empty());
+    fn varint_round_trips_and_rejects_non_minimal() {
+        for v in [0, 1, 63, 64, 16_383, 16_384, (1 << 30) - 1, 1 << 30, VARINT_MAX] {
+            let mut enc = Vec::new();
+            put_varint(&mut enc, v).unwrap();
+            let mut cur = enc.as_slice();
+            assert_eq!(get_varint(&mut cur).unwrap(), v);
+            assert!(cur.is_empty());
         }
-    }
-
-    #[test]
-    fn varint_sizes_are_minimal() {
-        let size = |v: u64| {
-            let mut out = Vec::new();
-            put_varint(&mut out, v);
-            out.len()
-        };
-        assert_eq!(size(63), 1);
-        assert_eq!(size(64), 2);
-        assert_eq!(size((1 << 14) - 1), 2);
-        assert_eq!(size(1 << 14), 4);
-        assert_eq!(size((1 << 30) - 1), 4);
-        assert_eq!(size(1 << 30), 8);
-    }
-
-    #[test]
-    fn non_minimal_varint_rejected() {
-        // 5 encoded in two bytes (prefix 01) instead of one.
-        let bytes = [0x40, 0x05];
-        let mut cursor = bytes.as_slice();
-        assert_eq!(get_varint(&mut cursor), Err(WireError::NonMinimalVarint));
-    }
-
-    #[test]
-    fn opaque_v_round_trips() {
-        for len in [0usize, 1, 63, 64, 1000, 20000] {
-            let bytes = vec![0xAB; len];
-            let mut out = Vec::new();
-            put_opaque_v(&mut out, &bytes);
-            let mut cursor = out.as_slice();
-            assert_eq!(get_opaque_v(&mut cursor).unwrap(), bytes, "len {len}");
-            assert!(cursor.is_empty());
-        }
-    }
-
-    #[test]
-    fn opaque_seq_round_trips() {
-        for items in [
-            vec![],
-            vec![vec![]],
-            vec![vec![1, 2, 3], vec![], vec![0xFF; 300]],
-        ] {
-            let mut out = Vec::new();
-            put_opaque_seq(&mut out, &items);
-            let mut cursor = out.as_slice();
-            assert_eq!(get_opaque_seq(&mut cursor).unwrap(), items);
-            assert!(cursor.is_empty());
-        }
-    }
-
-    #[test]
-    fn opaque_seq_absurd_count_rejected() {
-        // Count claims 2^40 elements with no bytes behind it.
-        let mut out = Vec::new();
-        put_varint(&mut out, 1 << 40);
-        let mut cursor = out.as_slice();
-        assert_eq!(
-            get_opaque_seq(&mut cursor),
-            Err(WireError::UnexpectedEof)
-        );
-    }
-
-    #[test]
-    fn malformed_optional_rejected() {
-        struct Unit;
-        impl Wire for Unit {
-            fn encode(&self, _out: &mut Vec<u8>) {}
-            fn decode(_buf: &mut &[u8]) -> Result<Self, WireError> {
-                Ok(Unit)
-            }
-        }
-        let bytes = [2u8];
-        let mut cursor = bytes.as_slice();
-        assert_eq!(
-            get_optional::<Unit>(&mut cursor).err(),
-            Some(WireError::MalformedOptional)
-        );
+        // 2-byte encoding of 5 (< 64) must fail.
+        let mut non_minimal: &[u8] = &[0x40, 0x05];
+        assert_eq!(get_varint(&mut non_minimal), Err(WireError::NonMinimalVarint));
+        // 4-byte encoding of 100 (< 16384) must fail.
+        let mut non_minimal4: &[u8] = &[0x80, 0x00, 0x00, 0x64];
+        assert_eq!(get_varint(&mut non_minimal4), Err(WireError::NonMinimalVarint));
     }
 }

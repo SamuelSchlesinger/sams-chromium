@@ -1,15 +1,20 @@
 [package]
 name = "mole-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Shared MoLE protocol machinery: wire encoding, Mole HTTP authentication scheme, configuration formats"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["rustcrypto", "std"]
+rustcrypto = ["mole-p256/rustcrypto", "ec-ihat/rustcrypto", "ec-act/rustcrypto"]
+boringssl = ["mole-p256/boringssl", "ec-ihat/boringssl", "ec-act/boringssl"]
+std = ["mole-p256/std", "ec-ihat/std", "ec-act/std"]
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-base64 = { workspace = true }
-thiserror = { workspace = true }
-# SHA-256 (key ids, challenge digests) comes from sigma_boring's BoringSSL
-# wrapper; expressed as a GN dep in //third_party/mole:mole_core, since it
-# needs in-tree BoringSSL and is not a Cargo-buildable crate.
+mole-p256 = { path = "../mole_p256", default-features = false }
+ec-ihat = { path = "../ec_ihat", default-features = false }
+ec-act = { path = "../ec_act", default-features = false }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

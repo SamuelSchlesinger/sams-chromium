@@ -1,0 +1,36 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("ec_act") {
+  crate_name = "ec_act"
+  crate_root = "src/lib.rs"
+  sources = [
+    "src/encoding.rs",
+    "src/hash.rs",
+    "src/lib.rs",
+    "src/protocol.rs",
+    "src/shake128.rs",
+    "src/sigma.rs",
+    "src/statements.rs",
+    "src/storage.rs",
+    "src/tests/mod.rs",
+    "src/tests/primitives.rs",
+    "src/tests/protocol.rs",
+    "src/tests/vectors.rs",
+    "src/wire.rs",
+  ]
+  inputs = [ "README.md" ]
+  test_inputs = [ "tests/vectors/draft-schlesinger-mole-ec-act-00.txt" ]
+  edition = "2024"
+  features = [ "boringssl" ]
+  rustflags = [ "--cap-lints=allow" ]
+  deps = [
+    "//third_party/mole/mole_p256",
+    "//third_party/rust/subtle/v2:lib",
+  ]
+  test_deps = [ "//third_party/rust/hex/v0_4:lib" ]
+  build_native_rust_unit_tests = true
+}

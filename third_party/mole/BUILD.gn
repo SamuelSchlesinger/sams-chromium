@@ -2,22 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The MoLE (Moderation of unLinkable Endorsements) cryptographic stack.
-#
-#   * mole_core — the MoLE wire encoding, `Mole` HTTP authentication scheme
-#     handling, and directory configuration formats shared with the
-#     server-side instantiation.
-#
-# The whole MoLE crypto runtime is first-party over BoringSSL
-# (//third_party/mole/{sigma_boring, ihat_boring, act_boring}). The vendored
-# reference crates that seeded the port — `sigma-proofs`,
-# `anonymous_credit_tokens`, and the `ihat` reference (on the
-# p256/elliptic-curve/curve25519-dalek stack) — were removed once their
-# differential tests had pinned byte-for-byte parity; nothing depends on them.
-#
-# These are upstream third-party sources, so lints are capped to `allow` the
-# way Cargo treats dependencies, rather than Chromium's first-party
-# `-D warnings`.
+# The MOLE (Moderation of unLinkable Endorsements) protocol and crypto stack:
+#   * //third_party/mole/mole_p256 — P-256 group/hash/RNG over BoringSSL
+#   * //third_party/mole/ec_ihat   — draft-ladd-mole-ec-ihat-00 (type 0x0002)
+#   * //third_party/mole/ec_act    — draft-schlesinger-mole-ec-act-00 (type 0x0001)
+#   * //third_party/mole:mole_core — draft-jms-mole-protocols-01 &
+#                                    draft-jms-mole-http-transport-01 codecs
 
 import("//build/rust/rust_static_library.gni")
 
@@ -32,14 +22,19 @@ rust_static_library("mole_core") {
     "mole-core/src/messages.rs",
     "mole-core/src/wire.rs",
   ]
-  edition = "2021"
+  edition = "2024"
+  features = [ "boringssl" ]
 
   rustflags = [ "--cap-lints=allow" ]
   deps = [
-    "//third_party/mole/sigma_boring",
+    "//third_party/mole/ec_act",
+    "//third_party/mole/ec_ihat",
+    "//third_party/mole/mole_p256",
     "//third_party/rust/base64/v0_22:lib",
     "//third_party/rust/serde/v1:lib",
     "//third_party/rust/serde_json/v1:lib",
     "//third_party/rust/thiserror/v2:lib",
   ]
+
+  build_native_rust_unit_tests = true
 }

@@ -3,13 +3,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
-# Runs the 4-origin MoLE demo over real HTTPS (BoringSSL TLS in the servers):
-#   anchor.com     (identity provider)   -> mole_demo_anchor   (BoringSSL TLS)
-#   antifraud.com  (shared moderator)    -> mole_demo_moderator(BoringSSL TLS)
-#   shoes.com      (a site)              -> static page        (TLS)
-#   socks.com      (a site)              -> static page        (TLS)
-# ...all mapped to localhost and driven by a content_shell/chrome build with the
-# ModeratedEndorsements feature. Usage:  ./run_demo.sh [out_dir]
+# Runs the 4-origin MOLE (`draft-jms-mole-protocols-01` /
+# `draft-jms-mole-http-transport-01`) demo over BoringSSL HTTPS:
+#   anchor.com     (EC-IHAT Anchor)     -> mole_demo_anchor    (BoringSSL TLS)
+#   antifraud.com  (EC-ACT Moderator)   -> mole_demo_moderator (BoringSSL TLS)
+#   shoes.com      (relying site 1)     -> static page         (TLS)
+#   socks.com      (relying site 2)     -> static page         (TLS)
+# Usage: ./run_demo.sh [out_dir]
 set -euo pipefail
 
 OUT="${1:-out/athm}"
@@ -38,7 +38,6 @@ PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
-# --- One local self-signed cert with SANs for all four origins. ------------
 echo "== minting a local demo certificate (SANs for the four origins) =="
 cat > "$TMP/san.cnf" <<EOF
 [req]
@@ -46,7 +45,7 @@ distinguished_name = dn
 x509_extensions = v3
 prompt = no
 [dn]
-CN = MoLE Demo
+CN = MOLE Demo
 [v3]
 subjectAltName = DNS:anchor.com,DNS:antifraud.com,DNS:shoes.com,DNS:socks.com
 basicConstraints = CA:FALSE
@@ -55,23 +54,23 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
   -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
   -config "$TMP/san.cnf" -extensions v3 2>/dev/null
 CERT="$TMP/cert.pem"; KEY="$TMP/key.pem"
-# Pin content_shell to exactly this cert (its SPKI) — not a blanket
-# ignore-all-cert-errors.
 SPKI="$(openssl x509 -in "$CERT" -pubkey -noout \
         | openssl pkey -pubin -outform der 2>/dev/null \
         | openssl dgst -sha256 -binary | openssl base64)"
 
 echo "== starting anchor.com (:8081, TLS) =="
-"$ANCHOR_BIN" --port 8081 --epoch "$EPOCH" --cert "$CERT" --key "$KEY" \
-  2>"$TMP/anchor.log" & PIDS+=($!)
+"$ANCHOR_BIN" --port 8081 --origin "https://anchor.com" --epoch "$EPOCH" \
+  --cert "$CERT" --key "$KEY" 2>"$TMP/anchor.log" & PIDS+=($!)
 for _ in $(seq 1 100); do grep -q ANCHOR_KEY "$TMP/anchor.log" 2>/dev/null && break; sleep 0.05; done
 ANCHOR_KEY="$(grep ANCHOR_KEY "$TMP/anchor.log" | awk '{print $2}')"
 ANCHOR_COMMITMENT="$(grep ANCHOR_COMMITMENT "$TMP/anchor.log" | cut -d' ' -f2-)"
 [[ -n "$ANCHOR_KEY" ]] || { echo "anchor failed:"; cat "$TMP/anchor.log"; exit 1; }
 
 echo "== starting antifraud.com (:8080, TLS), accepting anchor.com =="
-"$MOD_BIN" --port 8080 --anchor-key "$ANCHOR_KEY" --epoch "$EPOCH" \
-  --policy antifraud-basic --initial-credits 2 --issuance-batch 4 --charge 1 \
+"$MOD_BIN" --port 8080 --origin "https://antifraud.com" \
+  --anchor-key "$ANCHOR_KEY" --epoch "$EPOCH" --context antifraud-basic \
+  --balance-width 8 --initial-balance 4 --spend-amount 1 \
+  --max-top-up 0 --refund-amount 1 \
   --cert "$CERT" --key "$KEY" 2>"$TMP/mod.log" & PIDS+=($!)
 for _ in $(seq 1 100); do grep -q MODERATOR_COMMITMENT "$TMP/mod.log" 2>/dev/null && break; sleep 0.05; done
 MOD_COMMITMENT="$(grep MODERATOR_COMMITMENT "$TMP/mod.log" | cut -d' ' -f2-)"
@@ -81,10 +80,8 @@ echo "== starting shoes.com (:8082, TLS) and socks.com (:8083, TLS) =="
 python3 "$HERE/serve_static_tls.py" 8082 "$HERE/web/shoes" "$CERT" "$KEY" >/dev/null 2>&1 & PIDS+=($!)
 python3 "$HERE/serve_static_tls.py" 8083 "$HERE/web/socks" "$CERT" "$KEY" >/dev/null 2>&1 & PIDS+=($!)
 
-# The browser's key-commitment registry, keyed by the (https) serialized origin.
 COMMITMENTS="{\"anchors\":{\"https://anchor.com\":$ANCHOR_COMMITMENT},\"moderators\":{\"https://antifraud.com\":$MOD_COMMITMENT}}"
 
-# macOS: a relink can break content_shell's ad-hoc signature; re-sign defensively.
 if [[ "$(uname)" == "Darwin" && "$BROWSER" == *".app/"* ]]; then
   APP_BUNDLE="${BROWSER%%.app/*}.app"
   xattr -dr com.apple.provenance "$APP_BUNDLE" 2>/dev/null || true
@@ -93,11 +90,8 @@ if [[ "$(uname)" == "Darwin" && "$BROWSER" == *".app/"* ]]; then
 fi
 
 echo "== launching browser =="
-echo "   Visit anchor.com -> Get endorsement, then shoes.com / socks.com -> Verify."
-echo "   DevTools: open  http://localhost:9222  in another browser, pick the tab,"
-echo "   and use the Network tab to watch the 'Mole' exchanges (the Authorization:"
-echo "   Mole request headers and Mole-Credential responses are the credentials on"
-echo "   the wire). antifraud.com only ever sees a fresh, unlinkable nullifier."
+echo "   Visit anchor.com -> collects batched EC-IHAT endorsements, then visit"
+echo "   shoes.com / socks.com -> redeems at POST /mole/issue & presents at GET /gate."
 "$BROWSER" \
   --user-data-dir="$TMP/profile" \
   --remote-debugging-port=9222 \
