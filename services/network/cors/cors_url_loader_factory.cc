@@ -904,6 +904,16 @@ bool CorsURLLoaderFactory::IsValidRequest(
                                     : request.request_initiator,
       request.url);
   std::string forbidden_header;
+  if (!process_id_.is_browser() &&
+      (ContainsForbiddenMoleHeader(request.headers, &forbidden_header) ||
+       ContainsForbiddenMoleHeader(request.cors_exempt_headers,
+                                   &forbidden_header))) {
+    SCOPED_CRASH_KEY_STRING32("network", "forbidden_mole_header",
+                              forbidden_header);
+    mojo::ReportBadMessage(
+        "CorsURLLoaderFactory: Forbidden MOLE header from renderer");
+    return false;
+  }
   if (!process_id_.is_browser() && !allow_unsafe_headers &&
       ContainsForbiddenSecurityHeader(request.headers, &forbidden_header)) {
     SCOPED_CRASH_KEY_STRING32("network", "forbidden_sec_header",
@@ -911,6 +921,18 @@ bool CorsURLLoaderFactory::IsValidRequest(
     mojo::ReportBadMessage(
         "CorsURLLoaderFactory: Forbidden Sec- header from renderer");
     return false;
+  }
+
+  if (request.mole_params.has_value()) {
+    if (!IsUrlPotentiallyTrustworthy(request.url) ||
+        (request.mole_params->moderator.has_value() &&
+         (request.mole_params->moderator->opaque() ||
+          !IsOriginPotentiallyTrustworthy(*request.mole_params->moderator)))) {
+      mojo::ReportBadMessage(
+          "CorsURLLoaderFactory: mole_params requires potentially trustworthy "
+          "request URL and moderator origin");
+      return false;
+    }
   }
 
   if (!AreRequestHeadersSafe(request.headers) ||

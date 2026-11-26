@@ -1,0 +1,59 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Runnable 4-origin Split Moderation & Redemption HTTPS demo:
+# Anchor(s), Moderator, and Origin (`shoes` / `socks`) TLS 1.3 servers built on
+# `//third_party/mole_p256_rs`, `//third_party/mole:mole_core`, and BoringSSL.
+
+import("//build/rust/rust_executable.gni")
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("mole_demo") {
+  crate_name = "mole_demo"
+  crate_root = "src/lib.rs"
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+  allow_unsafe = true  # BoringSSL TLS 1.3 sockets via bssl_sys FFI.
+  build_native_rust_unit_tests = true
+  deps = [
+    "//third_party/boringssl:bssl_crypto",
+    "//third_party/boringssl:bssl_sys",
+    "//third_party/mole:mole_core",
+    "//third_party/mole_p256_rs:ec_act",
+    "//third_party/mole_p256_rs:ec_ihat",
+    "//third_party/mole_p256_rs:mole_p256",
+    "//third_party/rust/serde_json/v1:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+}
+
+rust_executable("mole_demo_anchor") {
+  crate_root = "anchor_main.rs"
+  sources = [ "anchor_main.rs" ]
+  edition = "2024"
+  deps = [
+    ":mole_demo",
+    "//third_party/mole:mole_core",
+  ]
+}
+
+rust_executable("mole_demo_moderator") {
+  crate_root = "moderator_main.rs"
+  sources = [ "moderator_main.rs" ]
+  edition = "2024"
+  deps = [
+    ":mole_demo",
+    "//third_party/mole:mole_core",
+  ]
+}
+
+rust_executable("mole_demo_origin") {
+  crate_root = "origin_main.rs"
+  sources = [ "origin_main.rs" ]
+  edition = "2024"
+  deps = [
+    ":mole_demo",
+    "//third_party/mole:mole_core",
+  ]
+}

@@ -1,0 +1,110 @@
+# Copyright 2026 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Unmodified upstream mirror of `Moderation-of-unLinkable-Endorsements/mole-p256-rs`
+# (`src/`), built against BoringSSL (`bssl_sys`) with `features = [ "boringssl" ]`:
+#   * `:mole_p256` — P-256 group arithmetic, RFC 9380 hash-to-curve, SHA-256, RNG
+#   * `:ec_ihat`   — `draft-ladd-mole-ec-ihat-00` (`0x0002`)
+#   * `:ec_act`    — `draft-schlesinger-mole-ec-act-00` (`0x0001`, EVP_shake128)
+
+import("//build/rust/rust_static_library.gni")
+
+rust_static_library("mole_p256") {
+  crate_name = "mole_p256"
+  crate_root = "src/crates/mole-p256/src/lib.rs"
+  sources = [
+    "src/crates/mole-p256/src/backend/boringssl.rs",
+    "src/crates/mole-p256/src/backend/boringssl/ffi.rs",
+    "src/crates/mole-p256/src/backend/mod.rs",
+    "src/crates/mole-p256/src/hash.rs",
+    "src/crates/mole-p256/src/lib.rs",
+    "src/crates/mole-p256/src/random.rs",
+    "src/crates/mole-p256/src/tests/mod.rs",
+    "src/crates/mole-p256/src/tests/oracle.rs",
+    "src/crates/mole-p256/src/tests/primitives.rs",
+  ]
+  inputs = [ "src/crates/mole-p256/README.md" ]
+  test_inputs = [ "src/crates/mole-p256/tests/vectors/derivations.rs" ]
+  edition = "2024"
+  no_chromium_prelude = true
+  no_clippy = true
+  allow_unsafe = true  # bssl_sys FFI confined to src/backend/boringssl/ffi.rs.
+  features = [ "boringssl" ]
+  rustflags = [ "--cap-lints=allow" ]
+  deps = [
+    "//third_party/boringssl:bssl_sys",
+    "//third_party/rust/subtle/v2:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+  test_deps = [ "//third_party/rust/hex/v0_4:lib" ]
+  build_native_rust_unit_tests = true
+}
+
+rust_static_library("ec_ihat") {
+  crate_name = "ec_ihat"
+  crate_root = "src/crates/ec-ihat/src/lib.rs"
+  sources = [
+    "src/crates/ec-ihat/src/commitment.rs",
+    "src/crates/ec-ihat/src/lib.rs",
+    "src/crates/ec-ihat/src/permutation.rs",
+    "src/crates/ec-ihat/src/protocol.rs",
+    "src/crates/ec-ihat/src/storage.rs",
+    "src/crates/ec-ihat/src/tests/components.rs",
+    "src/crates/ec-ihat/src/tests/mod.rs",
+    "src/crates/ec-ihat/src/tests/protocol.rs",
+    "src/crates/ec-ihat/src/tests/vectors.rs",
+    "src/crates/ec-ihat/src/wire.rs",
+  ]
+  inputs = [ "src/crates/ec-ihat/README.md" ]
+  test_inputs =
+      [ "src/crates/ec-ihat/tests/vectors/draft-ladd-mole-ec-ihat-00.txt" ]
+  edition = "2024"
+  no_chromium_prelude = true
+  no_clippy = true
+  features = [ "boringssl" ]
+  rustflags = [ "--cap-lints=allow" ]
+  deps = [
+    ":mole_p256",
+    "//third_party/rust/subtle/v2:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+  test_deps = [ "//third_party/rust/hex/v0_4:lib" ]
+  build_native_rust_unit_tests = true
+}
+
+rust_static_library("ec_act") {
+  crate_name = "ec_act"
+  crate_root = "src/crates/ec-act/src/lib.rs"
+  sources = [
+    "src/crates/ec-act/src/hash.rs",
+    "src/crates/ec-act/src/lib.rs",
+    "src/crates/ec-act/src/protocol.rs",
+    "src/crates/ec-act/src/shake128.rs",
+    "src/crates/ec-act/src/shake128/boringssl.rs",
+    "src/crates/ec-act/src/sigma.rs",
+    "src/crates/ec-act/src/statements.rs",
+    "src/crates/ec-act/src/tests/mod.rs",
+    "src/crates/ec-act/src/tests/primitives.rs",
+    "src/crates/ec-act/src/tests/protocol.rs",
+    "src/crates/ec-act/src/tests/vectors.rs",
+    "src/crates/ec-act/src/wire.rs",
+  ]
+  inputs = [ "src/crates/ec-act/README.md" ]
+  test_inputs =
+      [ "src/crates/ec-act/tests/vectors/draft-schlesinger-mole-ec-act-00.txt" ]
+  edition = "2024"
+  no_chromium_prelude = true
+  no_clippy = true
+  allow_unsafe = true  # bssl_sys EVP_shake128 FFI in src/shake128/boringssl.rs.
+  features = [ "boringssl" ]
+  rustflags = [ "--cap-lints=allow" ]
+  deps = [
+    ":mole_p256",
+    "//third_party/boringssl:bssl_sys",
+    "//third_party/rust/subtle/v2:lib",
+    "//third_party/rust/zeroize/v1:lib",
+  ]
+  test_deps = [ "//third_party/rust/hex/v0_4:lib" ]
+  build_native_rust_unit_tests = true
+}

@@ -45,6 +45,7 @@ import "services/network/public/mojom/ip_address_space.mojom";
 import "services/network/public/mojom/ip_endpoint.mojom";
 import "services/network/public/mojom/isolation_info.mojom";
 import "services/network/public/mojom/mdns_responder.mojom";
+import "services/network/public/mojom/moderated_endorsements.mojom";
 import "services/network/public/mojom/mutable_network_traffic_annotation_tag.mojom";
 import "services/network/public/mojom/net_log.mojom";
 import "services/network/public/mojom/network_anonymization_key.mojom";
@@ -940,6 +941,10 @@ struct URLLoaderFactoryParams {
 
   // Used to notify clients about Trust Token accesses.
   pending_remote<TrustTokenAccessObserver>? trust_token_observer;
+
+  // Used by URLLoader to coordinate Moderated Endorsements (MOLE) outbound
+  // headers and 1-step challenge-retry exchanges with the Browser Process.
+  pending_remote<MoleAuthObserver>? mole_observer;
 
   // Used to notify clients about shared dictionary reads or writes.
   pending_remote<SharedDictionaryAccessObserver>? shared_dictionary_observer;

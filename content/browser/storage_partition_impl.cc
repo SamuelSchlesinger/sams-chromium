@@ -79,6 +79,7 @@
 #include "content/browser/loader/subresource_proxying_url_loader_service.h"
 #include "content/browser/loader/url_loader_factory_utils.h"
 #include "content/browser/locks/lock_manager.h"
+#include "content/browser/moderated_endorsements/moderated_endorsements_manager.h"
 #include "content/browser/navigation_or_document_handle.h"
 #include "content/browser/network/cross_thread_network_context.h"
 #include "content/browser/network/shared_dictionary_util.h"
@@ -1317,6 +1318,20 @@ void StoragePartitionImpl::OnBrowserContextWillBeDestroyed() {
 
   if (declarative_performance_observer_store_) {
     declarative_performance_observer_store_->Close();
+  }
+
+  if (!is_off_the_record() && !GetPath().empty() && special_storage_policy_ &&
+      special_storage_policy_->HasSessionOnlyOrigins()) {
+    auto predicate =
+        special_storage_policy_->CreateDeleteCookieOnExitPredicate();
+    if (moderated_endorsements_manager_) {
+      moderated_endorsements_manager_->Shutdown(std::move(predicate));
+    } else {
+      ModeratedEndorsementsManager::ScheduleColdSessionOnlyCleanup(
+          browser_context_, GetPath(), std::move(predicate));
+    }
+  } else if (moderated_endorsements_manager_) {
+    moderated_endorsements_manager_->Shutdown({});
   }
 }
 
@@ -2929,13 +2944,30 @@ void StoragePartitionImpl::ClearDataImpl(
                                      end);
   }
 
-  DataDeletionHelper* helper = new DataDeletionHelper(
-      remove_mask,
+  const bool clear_mole =
+      (remove_mask & REMOVE_DATA_MASK_MODERATED_ENDORSEMENTS) != 0 ||
+      ((remove_mask & REMOVE_DATA_MASK_COOKIES) != 0 &&
+       (!filter_builder || !filter_builder->PartitionedCookiesOnly()) &&
+       (storage_key.origin().opaque() || storage_key.IsFirstPartyContext()));
+  base::RepeatingClosure done_barrier = base::BarrierClosure(
+      clear_mole ? 2 : 1,
       base::BindOnce(&StoragePartitionImpl::DeletionHelperDone,
                      weak_factory_.GetWeakPtr(), std::move(callback)));
+
+  DataDeletionHelper* helper = new DataDeletionHelper(
+      remove_mask, base::BindOnce(done_barrier));
   // `helper` deletes itself when done in
   // DataDeletionHelper::DecrementTaskCount().
   deletion_helpers_running_++;
+  if (clear_mole) {
+    GetModeratedEndorsementsManager()->ClearData(
+        filter_builder, storage_key,
+        /*is_user_initiated=*/
+        (remove_mask & (REMOVE_DATA_MASK_MODERATED_ENDORSEMENTS_USER_CLEAR |
+                        REMOVE_DATA_MASK_INTEREST_GROUPS_INTERNAL |
+                        REMOVE_DATA_MASK_INTEREST_GROUPS_USER_CLEAR)) != 0,
+        begin, end, base::BindOnce(done_barrier));
+  }
   helper->ClearData(
       storage_key, filter_builder, std::move(storage_key_policy_matcher),
       std::move(cookie_deletion_filter), GetPath(), dom_storage_context_.get(),
@@ -3692,8 +3724,38 @@ StoragePartitionImpl::CreateURLLoaderFactoryParams() {
   params->disable_web_security =
       base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kDisableWebSecurity);
+  params->mole_observer = CreateMoleAuthObserverForBrowserProcess();
   params->network_restrictions_id = network::GetNoOpNetworkRestrictionsId();
   return params;
+}
+
+ModeratedEndorsementsManager*
+StoragePartitionImpl::GetModeratedEndorsementsManager() {
+  if (!moderated_endorsements_manager_) {
+    moderated_endorsements_manager_ =
+        std::make_unique<ModeratedEndorsementsManager>(this);
+  }
+  return moderated_endorsements_manager_.get();
+}
+
+mojo::PendingRemote<network::mojom::MoleAuthObserver>
+StoragePartitionImpl::CreateMoleAuthObserverForFrame(
+    GlobalRenderFrameHostId frame_id) {
+  return GetModeratedEndorsementsManager()->CreateObserverRemoteForFrame(
+      frame_id);
+}
+
+mojo::PendingRemote<network::mojom::MoleAuthObserver>
+StoragePartitionImpl::CreateMoleAuthObserverForServiceWorker(
+    const url::Origin& worker_origin) {
+  return GetModeratedEndorsementsManager()
+      ->CreateObserverRemoteForServiceWorker(worker_origin);
+}
+
+mojo::PendingRemote<network::mojom::MoleAuthObserver>
+StoragePartitionImpl::CreateMoleAuthObserverForBrowserProcess() {
+  return GetModeratedEndorsementsManager()
+      ->CreateObserverRemoteForBrowserNavigation();
 }
 
 void StoragePartitionImpl::CreateURLLoaderFactoryForBrowserProcessInternal(

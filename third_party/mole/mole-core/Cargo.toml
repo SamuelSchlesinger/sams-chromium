@@ -1,0 +1,19 @@
+[package]
+name = "mole-core"
+version = "0.3.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["boringssl", "std"]
+rustcrypto = ["mole-p256/rustcrypto", "ec-ihat/rustcrypto", "ec-act/rustcrypto"]
+boringssl = ["mole-p256/boringssl", "ec-ihat/boringssl", "ec-act/boringssl"]
+std = ["mole-p256/std", "ec-ihat/std", "ec-act/std"]
+
+[dependencies]
+mole-p256 = { path = "../../mole_p256_rs/src/crates/mole-p256", default-features = false }
+ec-ihat = { path = "../../mole_p256_rs/src/crates/ec-ihat", default-features = false }
+ec-act = { path = "../../mole_p256_rs/src/crates/ec-act", default-features = false }
+base64 = ">=0.22, <0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

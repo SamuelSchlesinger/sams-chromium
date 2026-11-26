@@ -375,6 +375,7 @@ void ServiceWorkerSyntheticResponseManager::InitiateRequest(
     OnReceiveResponseCallback receive_response_callback,
     OnReceiveRedirectCallback receive_redirect_callback,
     OnCompleteCallback complete_callback) {
+  request.mole_params = std::nullopt;
   // A synthetic response request is initiated by the browser to fetch the
   // webpage's main resource. Just like a standard frame navigation, it does not
   // carry a factory-level network restrictions ID, as it is subjected to

@@ -20,7 +20,7 @@ class HttpRequestHeaders;
 
 // Given an HTTP header |header| with value |value|, returns the elided version
 // of the header value at |log_level|.
-NET_EXPORT_PRIVATE std::string ElideHeaderValueForNetLog(
+NET_EXPORT std::string ElideHeaderValueForNetLog(
     NetLogCaptureMode capture_mode,
     std::string_view header,
     std::string_view value);

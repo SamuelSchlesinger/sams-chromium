@@ -32,7 +32,9 @@
 #include "services/network/public/mojom/cross_origin_embedder_policy.mojom.h"
 #include "services/network/public/mojom/device_bound_sessions.mojom.h"
 #include "services/network/public/mojom/early_hints.mojom.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
 #include "services/network/public/mojom/shared_dictionary_access_observer.mojom.h"
 #include "services/network/public/mojom/url_loader.mojom-shared.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
@@ -73,6 +75,7 @@ network::mojom::URLLoaderFactoryParamsPtr CreateParams(
     mojo::PendingRemote<network::mojom::DevToolsObserver> devtools_observer,
     mojo::PendingRemote<network::mojom::DeviceBoundSessionAccessObserver>
         device_bound_session_observer,
+    mojo::PendingRemote<network::mojom::MoleAuthObserver> mole_observer,
     network::mojom::TrustTokenOperationPolicyVerdict
         trust_token_issuance_policy,
     network::mojom::TrustTokenOperationPolicyVerdict
@@ -146,6 +149,7 @@ network::mojom::URLLoaderFactoryParamsPtr CreateParams(
   params->devtools_observer = std::move(devtools_observer);
   params->device_bound_session_observer =
       std::move(device_bound_session_observer);
+  params->mole_observer = std::move(mole_observer);
 
   params->cookie_setting_overrides = cookie_setting_overrides;
 
@@ -212,7 +216,14 @@ URLLoaderFactoryParamsHelper::CreateForFrame(
       frame->CreateSharedDictionaryAccessObserver(),
       frame->CreateURLLoaderNetworkObserver(),
       NetworkServiceDevToolsObserver::MakeSelfOwned(frame->frame_tree_node()),
-      frame->CreateDeviceBoundSessionObserver(), trust_token_issuance_policy,
+      frame->CreateDeviceBoundSessionObserver(),
+      (!frame->IsInFencedFrameTree() &&
+       frame->IsFeatureEnabled(
+           network::mojom::PermissionsPolicyFeature::kModeratedEndorsements))
+          ? static_cast<StoragePartitionImpl*>(process->GetStoragePartition())
+                ->CreateMoleAuthObserverForFrame(frame->GetGlobalId())
+          : mojo::NullRemote(),
+      trust_token_issuance_policy,
       trust_token_redemption_policy, cookie_setting_overrides, debug_tag,
       /*require_cross_site_request_for_cookies=*/false,
       /*is_for_service_worker=*/false,
@@ -254,7 +265,8 @@ URLLoaderFactoryParamsHelper::CreateForIsolatedWorld(
       frame->CreateSharedDictionaryAccessObserver(),
       frame->CreateURLLoaderNetworkObserver(),
       NetworkServiceDevToolsObserver::MakeSelfOwned(frame->frame_tree_node()),
-      frame->CreateDeviceBoundSessionObserver(), trust_token_issuance_policy,
+      frame->CreateDeviceBoundSessionObserver(),
+      /*mole_observer=*/mojo::NullRemote(), trust_token_issuance_policy,
       trust_token_redemption_policy, cookie_setting_overrides,
       "ParamHelper::CreateForIsolatedWorld",
       /*require_cross_site_request_for_cookies=*/false,
@@ -301,6 +313,7 @@ URLLoaderFactoryParamsHelper::CreateForPrefetch(
       frame->CreateURLLoaderNetworkObserver(),
       NetworkServiceDevToolsObserver::MakeSelfOwned(frame->frame_tree_node()),
       frame->CreateDeviceBoundSessionObserver(),
+      /*mole_observer=*/mojo::NullRemote(),
       network::mojom::TrustTokenOperationPolicyVerdict::kForbid,
       network::mojom::TrustTokenOperationPolicyVerdict::kForbid,
       cookie_setting_overrides, "ParamHelper::CreateForPrefetch",
@@ -356,6 +369,10 @@ URLLoaderFactoryParamsHelper::CreateForWorker(
       std::move(url_loader_network_observer), std::move(devtools_observer),
       static_cast<StoragePartitionImpl*>(process->GetStoragePartition())
           ->CreateDeviceBoundSessionObserverForServiceWorker(),
+      is_for_service_worker
+          ? static_cast<StoragePartitionImpl*>(process->GetStoragePartition())
+                ->CreateMoleAuthObserverForServiceWorker(request_initiator)
+          : mojo::NullRemote(),
       // Trust Token redemption and signing operations require the Permissions
       // Policy. It seems Permissions Policy in worker contexts
       // is currently an open issue (as of 06/21/2022):
@@ -438,6 +455,7 @@ URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload(
       std::move(url_loader_network_observer),
       /*devtools_observer=*/mojo::NullRemote(),
       std::move(device_bound_session_observer),
+      /*mole_observer=*/mojo::NullRemote(),
       network::mojom::TrustTokenOperationPolicyVerdict::kForbid,
       network::mojom::TrustTokenOperationPolicyVerdict::kForbid,
       net::CookieSettingOverrides(), "ParamHelper::CreateForEarlyHintsPreload",

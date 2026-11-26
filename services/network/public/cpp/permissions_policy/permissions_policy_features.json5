@@ -446,6 +446,11 @@
       permissions_policy_name: "midi",
     },
     {
+      name: "ModeratedEndorsements",
+      permissions_policy_name: "moderated-endorsements",
+      depends_on: ["ModeratedEndorsements"],
+    },
+    {
       name: "MulticastInDirectSockets",
       permissions_policy_name: "direct-sockets-multicast",
       visibility: "IsolatedContext",

@@ -6061,6 +6061,9 @@ void RenderFrameImpl::BeginNavigationInternal(
           info->url_request.TrustTokenParams()
               ? info->url_request.TrustTokenParams()->Clone()
               : nullptr,
+          info->url_request.MoleParams()
+              ? info->url_request.MoleParams()->Clone()
+              : nullptr,
           renderer_before_unload_start, renderer_before_unload_end,
           before_unload_dialog_opened, before_unload_dialog_closed,
           /*started_with_transient_activation=*/

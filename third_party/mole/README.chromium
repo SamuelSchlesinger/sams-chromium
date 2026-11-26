@@ -1,0 +1,18 @@
+Name: MOLE Protocol & Split HTTP Transport Core (mole-core)
+Short Name: mole-core
+URL: https://github.com/Moderation-of-unLinkable-Endorsements/internet-drafts
+Version: 0.3.0
+License: BSD-3-Clause
+Security Critical: yes
+Shipped: yes
+
+Description:
+Memory-safe (`#![forbid(unsafe_code)]`) Rust wire codecs, RFC 9651 Structured
+Field HTTP headers (`Mole-Challenge`, `Sec-Mole-Authorization`,
+`Sec-Mole-Grease`, `Mole-Info`), Split Moderation & Redemption binary POST
+envelopes (`Issue`, `Present`, `Settle`), `ClearanceToken` wire codecs,
+`draft-jms-mole-http-transport-01` inline headers, and `/.well-known/` JSON
+configuration validators built atop `//third_party/mole_p256_rs`.
+
+Local Modifications:
+First-party Chromium integration crate.

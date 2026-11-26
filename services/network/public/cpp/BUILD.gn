@@ -679,6 +679,8 @@ component("cpp_base") {
     "network_ipc_param_traits.h",
     "network_isolation_key_mojom_traits.cc",
     "network_isolation_key_mojom_traits.h",
+    "optional_mole_params.cc",
+    "optional_mole_params.h",
     "optional_trust_token_params.cc",
     "optional_trust_token_params.h",
     "originating_process_id.cc",

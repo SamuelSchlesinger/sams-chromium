@@ -1460,6 +1460,24 @@ void URLRequestHttpJob::RestartTransaction() {
   // extra_headers, we need to strip them out before adding them again.
   request_info_.extra_headers.RemoveHeader(HttpRequestHeaders::kCookie);
 
+  // Strip single-use Moderated Endorsements (MOLE) credentials before
+  // restarting a transaction (e.g. after a 407 Proxy Authentication Required
+  // challenge) so single-use proofs cannot be replayed across transactions.
+  request_info_.extra_headers.RemoveHeader("Sec-Mole-Authorization");
+  request_info_.extra_headers.RemoveHeader("Sec-Mole-Grease");
+  request_info_.extra_headers.RemoveHeader("Sec-Want-Endorsement");
+  if (std::optional<std::string> auth_val =
+          request_info_.extra_headers.GetHeader(
+              HttpRequestHeaders::kAuthorization)) {
+    std::string_view trimmed = HttpUtil::TrimLWS(*auth_val);
+    if (trimmed.size() >= 4 &&
+        base::EqualsCaseInsensitiveASCII(trimmed.substr(0, 4), "mole") &&
+        (trimmed.size() == 4 || HttpUtil::IsLWS(trimmed[4]))) {
+      request_info_.extra_headers.RemoveHeader(
+          HttpRequestHeaders::kAuthorization);
+    }
+  }
+
   // TODO(https://crbug.com/968327/): This is weird, as all other clearing is at
   // the URLRequest layer. Should this call into URLRequest so it can share
   // logic at that layer with SetAuth()?

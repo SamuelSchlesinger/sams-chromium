@@ -104,6 +104,7 @@ namespace {
   DO_FIELD(recursive_prefetch_token) __VA_ARGS__                   \
   DO_FIELD(trusted_params) __VA_ARGS__                             \
   DO_FIELD(trust_token_params) __VA_ARGS__                         \
+  DO_FIELD(mole_params) __VA_ARGS__                                \
   DO_FIELD(web_bundle_token_params) __VA_ARGS__                    \
   DO_FIELD(devtools_accepted_stream_types) __VA_ARGS__             \
   DO_FIELD(net_log_create_info) __VA_ARGS__                        \

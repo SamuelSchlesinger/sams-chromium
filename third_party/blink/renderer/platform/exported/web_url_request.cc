@@ -35,6 +35,7 @@
 #include "base/time/time.h"
 #include "net/base/load_flags.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/public/cpp/optional_mole_params.h"
 #include "services/network/public/cpp/optional_trust_token_params.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/platform/url_conversion.h"
@@ -43,6 +44,7 @@
 #include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/platform/web_url_request_extra_data.h"
+#include "third_party/blink/renderer/platform/loader/fetch/mole_params_conversion.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
 #include "third_party/blink/renderer/platform/loader/fetch/trust_token_params_conversion.h"
 #include "third_party/blink/renderer/platform/network/encoded_form_data.h"
@@ -497,6 +499,10 @@ std::optional<base::UnguessableToken> WebURLRequest::RecursivePrefetchToken()
 
 network::OptionalTrustTokenParams WebURLRequest::TrustTokenParams() const {
   return ConvertTrustTokenParams(resource_request_->TrustTokenParams());
+}
+
+network::OptionalMoleParams WebURLRequest::MoleParams() const {
+  return ConvertMoleParams(resource_request_->MoleParams());
 }
 
 std::optional<WebURL> WebURLRequest::WebBundleUrl() const {

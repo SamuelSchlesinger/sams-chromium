@@ -293,6 +293,41 @@ const scoped_refptr<base::SingleThreadTaskRunner>& TaskRunner(
   return base::SingleThreadTaskRunner::GetCurrentDefault();
 }
 
+bool CanCloneForMoleChallengeRetry(const ResourceRequest& request,
+                                   bool has_fetch_streaming_upload_body) {
+  if (has_fetch_streaming_upload_body) {
+    return false;
+  }
+  if (request.request_body) {
+    for (const auto& elem : *request.request_body->elements()) {
+      if (elem.type() == mojom::DataElementDataView::Tag::kFile ||
+          elem.type() == mojom::DataElementDataView::Tag::kChunkedDataPipe ||
+          elem.type() == mojom::DataElementDataView::Tag::kDataPipe) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+void RemoveMoleHeadersFromUrlRequest(net::URLRequest& url_request) {
+  std::vector<std::string> names_to_remove;
+  for (const auto& pair :
+       url_request.extra_request_headers().GetHeaderVector()) {
+    if (base::StartsWith(pair.key, "sec-mole-",
+                         base::CompareCase::INSENSITIVE_ASCII) ||
+        base::EqualsCaseInsensitiveASCII(pair.key, kSecWantEndorsementHeader) ||
+        (base::EqualsCaseInsensitiveASCII(
+             pair.key, net::HttpRequestHeaders::kAuthorization) &&
+         IsMoleAuthorizationScheme(pair.value))) {
+      names_to_remove.push_back(pair.key);
+    }
+  }
+  for (const std::string& name : names_to_remove) {
+    url_request.RemoveRequestHeaderByName(name);
+  }
+}
+
 }  // namespace
 
 URLLoader::MaybeSyncURLLoaderClient::MaybeSyncURLLoaderClient(
@@ -435,8 +470,20 @@ URLLoader::URLLoader(
               ? request.trusted_params
                     ->expected_response_headers_for_synthetic_response
               : nullptr),
-      durable_message_writer_(std::move(maybe_durable_message_writer)) {
+      durable_message_writer_(std::move(maybe_durable_message_writer)),
+      traffic_annotation_(traffic_annotation),
+      shared_dictionary_manager_(shared_dictionary_manager),
+      shared_resource_checker_(shared_resource_checker),
+      mole_interceptor_(MoleUrlLoaderInterceptor::MaybeCreate(
+          request.mole_params,
+          context.GetMoleAuthObserver())) {
   DCHECK(delete_callback_);
+
+  if (mole_interceptor_ &&
+      CanCloneForMoleChallengeRetry(request,
+                                    has_fetch_streaming_upload_body_)) {
+    mole_retry_request_ = request;
+  }
 
   // To minimize performance overhead and UMA report volume, this metric is
   // only logged for extremely long URLs, and aims to track their prevalence.
@@ -687,7 +734,7 @@ void URLLoader::ProcessOutboundTrustTokenInterceptor(
   // If no Trust Token parameters are specified, proceed to the next
   // interceptor.
   if (!request.trust_token_params) {
-    ScheduleStart();
+    ProcessOutboundMoleInterceptor();
     return;
   }
   // If trust_token_params exist, the interceptor MUST have been created in the
@@ -752,7 +799,30 @@ void URLLoader::OnDoneBeginningTrustTokenOperation(
     url_request_->SetExtraRequestHeaderByName(
         header_pair.key, header_pair.value, /*overwrite=*/true);
   }
-  // Trust Token outbound processing is done, proceed to ScheduleStart.
+  // Trust Token outbound processing is done, proceed to MOLE / ScheduleStart.
+  ProcessOutboundMoleInterceptor();
+}
+
+void URLLoader::ProcessOutboundMoleInterceptor() {
+  if (!mole_interceptor_) {
+    ScheduleStart();
+    return;
+  }
+  url_request_->SetLoadFlags(url_request_->load_flags() |
+                             mole_interceptor_->GetAdditionalLoadFlags());
+  mole_interceptor_->BeginOutboundRequest(
+      url_request_->url(), url_request_->method(),
+      url_request_->isolation_info().top_frame_origin().value_or(url::Origin()),
+      base::BindOnce(&URLLoader::OnDoneBeginningMoleOperation,
+                     weak_ptr_factory_.GetWeakPtr()));
+}
+
+void URLLoader::OnDoneBeginningMoleOperation(
+    net::HttpRequestHeaders headers_to_attach) {
+  for (const auto& header_pair : headers_to_attach.GetHeaderVector()) {
+    url_request_->SetExtraRequestHeaderByName(
+        header_pair.key, header_pair.value, /*overwrite=*/true);
+  }
   ScheduleStart();
 }
 
@@ -777,6 +847,12 @@ void URLLoader::ScheduleStart() {
 URLLoader::~URLLoader() {
   TRACE_EVENT("loading", "URLLoader::~URLLoader",
               net::NetLogWithSourceToFlow(url_request_->net_log()));
+  if (mole_interceptor_) {
+    if (url_request_ && url_request_->GetTotalSentBytes().is_positive()) {
+      mole_interceptor_->OnWireBytesSent();
+    }
+    mole_interceptor_->OnLoaderCompleted(net::ERR_ABORTED);
+  }
   if (keepalive_ && keepalive_statistics_recorder_) {
     keepalive_statistics_recorder_->OnLoadFinished(
         *factory_params_->top_frame_id, keepalive_request_size_);
@@ -825,7 +901,11 @@ void URLLoader::FollowRedirect(
   // adding headers can.
   if (!AreRequestHeadersSafe(headers_update_params.modified_headers) ||
       !AreRequestHeadersSafe(
-          headers_update_params.modified_cors_exempt_headers)) {
+          headers_update_params.modified_cors_exempt_headers) ||
+      (!factory_params_->process_id.is_browser() &&
+       (ContainsForbiddenMoleHeader(headers_update_params.modified_headers) ||
+        ContainsForbiddenMoleHeader(
+            headers_update_params.modified_cors_exempt_headers)))) {
     NotifyCompleted(net::ERR_INVALID_ARGUMENT);
     // |this| may have been deleted.
     return;
@@ -853,6 +933,7 @@ void URLLoader::FollowRedirect(
     url_request_->RemoveRequestHeaderByName(
         net::HttpRequestHeaders::kSecPrivateVerificationToken);
   }
+  RemoveMoleHeadersFromUrlRequest(*url_request_);
 
   net::HttpRequestHeaders merged_modified_headers =
       std::move(headers_update_params.modified_headers);
@@ -994,6 +1075,22 @@ void URLLoader::OnReceivedRedirect(net::URLRequest* url_request,
   // Send the redirect response to the client, allowing them to inspect it and
   // optionally follow the redirect.
   *defer_redirect = true;
+
+  ExtractedMoleResponseHeaders extracted_mole;
+  if (url_request_->response_headers()) {
+    extracted_mole =
+        ExtractAndStripMoleResponseHeaders(*url_request_->response_headers());
+  }
+  RemoveMoleHeadersFromUrlRequest(*url_request_);
+  if (mole_interceptor_) {
+    if (url_request_->GetTotalSentBytes().is_positive() ||
+        !url_request_->was_cached()) {
+      mole_interceptor_->OnWireBytesSent();
+    }
+    mole_interceptor_->OnRedirect(redirect_info.status_code,
+                                  std::move(extracted_mole));
+  }
+  mole_retry_request_.reset();
 
   mojom::URLResponseHeadPtr response = BuildResponseHead();
   DispatchOnRawResponse();
@@ -1203,8 +1300,79 @@ void URLLoader::OnResponseStarted(net::URLRequest* url_request, int net_error) {
     return;
   }
 
+  ExtractedMoleResponseHeaders extracted_mole;
+  int mole_http_status = 0;
+  if (url_request_->response_headers()) {
+    mole_http_status = url_request_->response_headers()->response_code();
+    extracted_mole =
+        ExtractAndStripMoleResponseHeaders(*url_request_->response_headers());
+  }
+
   response_ = BuildResponseHead();
   DispatchOnRawResponse();
+
+  if (mole_interceptor_) {
+    if (url_request_->GetTotalSentBytes().is_positive() ||
+        !url_request_->was_cached()) {
+      mole_interceptor_->OnWireBytesSent();
+    }
+    mole_interceptor_->ProcessOriginResponse(
+        url_request_->url(), url_request_->method(),
+        url_request_->isolation_info().top_frame_origin().value_or(
+            url::Origin()),
+        mole_http_status, std::move(extracted_mole),
+        /*allow_challenge_retry=*/mole_retry_request_.has_value(),
+        base::BindOnce(&URLLoader::ContinueResponseAfterMole,
+                       weak_ptr_factory_.GetWeakPtr()));
+    return;
+  }
+
+  ContinueResponseAfterMole(MoleUrlLoaderInterceptor::ResponseAction());
+}
+
+void URLLoader::ContinueResponseAfterMole(
+    MoleUrlLoaderInterceptor::ResponseAction action) {
+  if (action.should_retry && mole_retry_request_.has_value() &&
+      mole_interceptor_) {
+    url_request_->Cancel();
+    ResetRawHeadersForRedirect();
+    response_.reset();
+    has_received_response_ = false;
+    pvt_token_removed_due_to_cookies_ = false;
+    cookie_access_details_.clear();
+    request_cookies_.clear();
+
+    ResourceRequest retry_request = std::move(*mole_retry_request_);
+    mole_retry_request_.reset();
+
+    url_request_ = url_request_context_->CreateRequest(
+        retry_request.url, retry_request.priority, this, traffic_annotation_,
+        factory_params_->target_network.value_or(
+            net::handles::kInvalidNetworkHandle),
+        /*is_for_websockets=*/false, retry_request.net_log_create_info);
+    url_request_->SetUserData(kUserDataKey,
+                              std::make_unique<UnownedPointer>(this));
+    url_loader_util::ConfigureUrlRequest(retry_request, *factory_params_,
+                                         *origin_access_list_, *url_request_,
+                                         *shared_resource_checker_);
+    SetUpUrlRequestCallbacks(shared_dictionary_manager_);
+    if (retry_request.request_body) {
+      scoped_refptr<base::SequencedTaskRunner> task_runner =
+          base::ThreadPool::CreateSequencedTaskRunner(
+              {base::MayBlock(), base::TaskPriority::USER_VISIBLE});
+      url_request_->set_upload(url_loader_util::CreateUploadDataStream(
+          retry_request.request_body.get(), std::vector<base::File>(),
+          task_runner.get()));
+    }
+    url_request_->SetLoadFlags(url_request_->load_flags() |
+                               mole_interceptor_->GetAdditionalLoadFlags());
+    for (const auto& header_pair : action.retry_headers.GetHeaderVector()) {
+      url_request_->SetExtraRequestHeaderByName(
+          header_pair.key, header_pair.value, /*overwrite=*/true);
+    }
+    ScheduleStart();
+    return;
+  }
 
   if (expected_response_headers_for_synthetic_response &&
       !CheckHeaderConsistencyForSyntheticResponse(
@@ -1855,10 +2023,17 @@ int URLLoader::OnBeforeStartTransaction(
   base::UmaHistogramBoolean("Net.URLLoader.HasHeaderClient", !!header_client_);
   if (header_client_) {
     on_before_send_headers_start_time_ = base::TimeTicks::Now();
+    std::optional<net::HttpRequestHeaders> fallback_headers =
+        headers_modified ? std::make_optional(*used_headers) : std::nullopt;
+    const bool disallow_cookies =
+        !url_request_->allow_credentials() || CookiesDisabled() ||
+        request_credentials_mode_ == mojom::CredentialsMode::kOmit;
     header_client_->OnBeforeSendHeaders(
         url_request_->url(), *used_headers,
         base::BindOnce(&URLLoader::OnBeforeSendHeadersComplete,
-                       weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
+                       weak_ptr_factory_.GetWeakPtr(), std::move(callback),
+                       std::move(fallback_headers), *used_headers,
+                       disallow_cookies));
     return net::ERR_IO_PENDING;
   }
 
@@ -2059,6 +2234,13 @@ void URLLoader::NotifyCompleted(int error_code) {
     }
   }
 
+  if (mole_interceptor_) {
+    if (url_request_->GetTotalSentBytes().is_positive()) {
+      mole_interceptor_->OnWireBytesSent();
+    }
+    mole_interceptor_->OnLoaderCompleted(error_code);
+  }
+
   if (url_loader_client_.Get()) {
     if (consumer_handle_.is_valid())
       SendResponseToClient();
@@ -2203,6 +2385,9 @@ void URLLoader::MaybeNotifyEarlyResponseToDevtools(
 
 void URLLoader::SetRawRequestHeadersAndNotify(
     net::HttpRawRequestHeaders headers) {
+  if (mole_interceptor_) {
+    mole_interceptor_->OnWireBytesSent();
+  }
   // If we have emitted_devtools_raw_request_, don't notify DevTools
   // to prevent duplicate ExtraInfo events.
   if (!emitted_devtools_raw_request_ && devtools_observer_ &&
@@ -2410,6 +2595,9 @@ void URLLoader::ResumeStart() {
 
 void URLLoader::OnBeforeSendHeadersComplete(
     net::NetworkDelegate::OnBeforeStartTransactionCallback callback,
+    std::optional<net::HttpRequestHeaders> fallback_headers,
+    net::HttpRequestHeaders pre_header_client_headers,
+    bool disallow_cookies,
     int result,
     const std::optional<net::HttpRequestHeaders>& headers,
     std::optional<base::DictValue> extended_net_log_events) {
@@ -2417,10 +2605,13 @@ void URLLoader::OnBeforeSendHeadersComplete(
   base::UmaHistogramTimes(
       "Net.URLLoader.OnBeforeSendHeadersDuration",
       base::TimeTicks::Now() - on_before_send_headers_start_time_);
-  if (include_request_cookies_with_response_ && headers) {
+  std::optional<net::HttpRequestHeaders> sanitized_headers =
+      SanitizeHeaderClientResult(headers, fallback_headers,
+                                 pre_header_client_headers, disallow_cookies);
+  if (include_request_cookies_with_response_ && sanitized_headers) {
     request_cookies_.clear();
     std::string cookie_header =
-        headers->GetHeader(net::HttpRequestHeaders::kCookie)
+        sanitized_headers->GetHeader(net::HttpRequestHeaders::kCookie)
             .value_or(std::string());
     net::cookie_util::ParseRequestCookieLine(cookie_header, &request_cookies_);
   }
@@ -2431,7 +2622,7 @@ void URLLoader::OnBeforeSendHeadersComplete(
           return extended_net_log_events->Clone();
         });
   }
-  std::move(callback).Run(result, headers);
+  std::move(callback).Run(result, sanitized_headers);
 }
 
 void URLLoader::OnHeadersReceivedComplete(

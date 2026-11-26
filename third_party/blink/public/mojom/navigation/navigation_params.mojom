@@ -11,6 +11,7 @@ import "mojo/public/mojom/base/values.mojom";
 import "services/network/public/mojom/content_security_policy.mojom";
 import "services/network/public/mojom/fetch_api.mojom";
 import "services/network/public/mojom/link_header.mojom";
+import "services/network/public/mojom/moderated_endorsements.mojom";
 import "services/network/public/mojom/source_location.mojom";
 import "services/network/public/mojom/storage_access_api.mojom";
 import "services/network/public/mojom/trust_tokens.mojom";
@@ -169,6 +170,10 @@ struct BeginNavigationParams {
   // operation (https://github.com/wicg/trust-token-api) and attach headers
   // conveying the result of the operation. Set on some child frame navigations.
   network.mojom.TrustTokenParams? trust_token_params;
+
+  // Declarative Moderated Endorsements (MOLE) parameters set on `<form moderated>`
+  // submissions.
+  network.mojom.MoleRequestParams? mole_params;
 
   // Timestamps of the renderer running beforeunload handlers on local frames
   // in preparation for navigating. Used for metrics.

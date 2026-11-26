@@ -25,6 +25,7 @@
 #include "net/url_request/redirect_info.h"
 #include "net/url_request/referrer_policy.h"
 #include "services/network/public/cpp/fetch_retry_options.h"
+#include "services/network/public/cpp/optional_mole_params.h"
 #include "services/network/public/cpp/optional_trust_token_params.h"
 #include "services/network/public/cpp/permissions_policy/permissions_policy.h"
 #include "services/network/public/cpp/resource_request_body.h"
@@ -36,6 +37,7 @@
 #include "services/network/public/mojom/devtools_observer.mojom-forward.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "services/network/public/mojom/ip_address_space.mojom-shared.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom.h"
 #include "services/network/public/mojom/referrer_policy.mojom-shared.h"
 #include "services/network/public/mojom/shared_dictionary_access_observer.mojom.h"
 #include "services/network/public/mojom/trust_token_access_observer.mojom-forward.h"
@@ -277,6 +279,7 @@ struct COMPONENT_EXPORT(NETWORK_CPP_BASE) ResourceRequest {
   // field trivially copyable; see OptionalTrustTokenParams's definition for
   // more context.
   OptionalTrustTokenParams trust_token_params;
+  OptionalMoleParams mole_params;
   std::optional<WebBundleTokenParams> web_bundle_token_params;
   // If not null, the network service will not advertise any stream types
   // (via Accept-Encoding) that are not listed. Also, it will not attempt

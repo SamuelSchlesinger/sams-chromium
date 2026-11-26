@@ -167,7 +167,7 @@ class NavigationURLLoaderImplTest : public testing::Test {
             std::string() /* searchable_form_encoding */,
             GURL() /* client_side_redirect_url */,
             std::nullopt /* devtools_initiator_info */,
-            nullptr /* trust_token_params */,
+            nullptr /* trust_token_params */, nullptr /* mole_params */,
             base::TimeTicks() /* renderer_before_unload_start */,
             base::TimeTicks() /* renderer_before_unload_end */,
             base::TimeTicks() /* before_unload_dialog_opened */,

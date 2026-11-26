@@ -43,6 +43,7 @@
 #include "services/network/public/mojom/cors.mojom-blink-forward.h"
 #include "services/network/public/mojom/fetch_api.mojom-blink.h"
 #include "services/network/public/mojom/ip_address_space.mojom-blink-forward.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom-blink.h"
 #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink-forward.h"
 #include "services/network/public/mojom/trust_tokens.mojom-blink.h"
 #include "services/network/public/mojom/web_bundle_handle.mojom-blink.h"
@@ -549,6 +550,15 @@ class PLATFORM_EXPORT ResourceRequestHead {
     trust_token_params_ = std::move(params);
   }
 
+  const std::optional<network::mojom::blink::MoleRequestParams>& MoleParams()
+      const {
+    return mole_params_;
+  }
+  void SetMoleParams(
+      std::optional<network::mojom::blink::MoleRequestParams> params) {
+    mole_params_ = std::move(params);
+  }
+
   // Whether either RequestorOrigin or IsolatedWorldOrigin can display the
   // |url|,
   bool CanDisplay(const KURL&) const;
@@ -725,6 +735,7 @@ class PLATFORM_EXPORT ResourceRequestHead {
   network::mojom::CorsPreflightPolicy cors_preflight_policy_;
   std::optional<RedirectInfo> redirect_info_;
   std::optional<network::mojom::blink::TrustTokenParams> trust_token_params_;
+  std::optional<network::mojom::blink::MoleRequestParams> mole_params_;
   network::mojom::IPAddressSpace target_address_space_;
 
   std::optional<AdProvenance> ad_provenance_;

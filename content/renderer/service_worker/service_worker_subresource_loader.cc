@@ -293,6 +293,10 @@ bool ServiceWorkerSubresourceLoader::StartRaceNetworkRequest() {
     return false;
   }
 
+  if (resource_request_.mole_params.has_value()) {
+    return false;
+  }
+
   // RaceNetworkRequest only supports GET method.
   if (resource_request_.method != net::HttpRequestHeaders::kGetMethod) {
     return false;

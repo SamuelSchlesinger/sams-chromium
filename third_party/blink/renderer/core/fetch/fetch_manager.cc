@@ -1187,6 +1187,7 @@ void FetchLoaderBase::PerformHTTPFetch(ExceptionState& exception_state) {
   request.SetHttpMethod(fetch_request_data_->Method());
   request.SetFetchWindowId(fetch_request_data_->WindowId());
   request.SetTrustTokenParams(fetch_request_data_->TrustTokenParams());
+  request.SetMoleParams(fetch_request_data_->MoleParams());
   request.SetMode(fetch_request_data_->Mode());
   request.SetTargetAddressSpace(fetch_request_data_->TargetAddressSpace());
 

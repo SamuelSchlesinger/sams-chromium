@@ -12,6 +12,7 @@
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "services/network/public/cpp/fetch_retry_options.h"
 #include "services/network/public/mojom/fetch_api.mojom-blink-forward.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom-blink.h"
 #include "services/network/public/mojom/referrer_policy.mojom-blink-forward.h"
 #include "services/network/public/mojom/trust_tokens.mojom-blink.h"
 #include "services/network/public/mojom/url_loader_factory.mojom-blink.h"
@@ -173,6 +174,15 @@ class CORE_EXPORT FetchRequestData final
     trust_token_params_ = std::move(trust_token_params);
   }
 
+  const std::optional<network::mojom::blink::MoleRequestParams>& MoleParams()
+      const {
+    return mole_params_;
+  }
+  void SetMoleParams(
+      std::optional<network::mojom::blink::MoleRequestParams> mole_params) {
+    mole_params_ = std::move(mole_params);
+  }
+
   base::UnguessableToken ServiceWorkerRaceNetworkRequestToken() const {
     return service_worker_race_network_request_token_;
   }
@@ -227,6 +237,7 @@ class CORE_EXPORT FetchRequestData final
   mojom::blink::FetchPriorityHint fetch_priority_hint_ =
       mojom::blink::FetchPriorityHint::kAuto;
   std::optional<network::mojom::blink::TrustTokenParams> trust_token_params_;
+  std::optional<network::mojom::blink::MoleRequestParams> mole_params_;
   // FIXME: Support m_useURLCredentialsFlag;
   // FIXME: Support m_redirectCount;
   Member<BodyStreamBuffer> buffer_;

@@ -1,0 +1,20 @@
+Name: MOLE P-256 Cryptographic Primitives (mole-p256-rs)
+Short Name: mole-p256-rs
+URL: https://github.com/Moderation-of-unLinkable-Endorsements/mole-p256-rs.git
+Version: 0.1.0
+Revision: 230a96e62bfa324295e8e9e06514c64a8daf161d
+License: Apache-2.0 AND MIT
+License File: src/LICENSE-APACHE, src/LICENSE-MIT
+Security Critical: yes
+Shipped: yes
+
+Description:
+Upstream Rust implementation of the MOLE cryptographic schemes over NIST P-256
+using BoringSSL (`bssl_sys`) via the `boringssl` Cargo feature:
+  * `mole-p256`: P-256 group arithmetic, RFC 9380 hash-to-curve, SHA-256, RNG
+  * `ec-ihat`: `draft-ladd-mole-ec-ihat-00` (`0x0002`)
+  * `ec-act`: `draft-schlesinger-mole-ec-act-00` (`0x0001`, `2^L` range proofs,
+    `EVP_shake128` via BoringSSL)
+
+Local Modifications:
+None (`src/` is an unmodified copy of upstream `230a96e62bfa324295e8e9e06514c64a8daf161d`).

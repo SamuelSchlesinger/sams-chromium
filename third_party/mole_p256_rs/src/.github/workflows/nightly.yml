@@ -1,0 +1,102 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Deep checks
+
+# Slower checks that do not need to run on every commit: Miri over the
+# pure-Rust paths and coverage, weekly, and mutation testing of the proof,
+# permutation, encoding, and storage modules, on demand. CI mutates the lines
+# each change touches.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri (pure-Rust primitives)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      # SHA-256 is forced to its portable implementation: the hardware
+      # intrinsics use loads Miri cannot model. The FFI backend cannot run
+      # at all.
+      - run: >
+          cargo miri test -p mole-p256 --lib --
+          rustcrypto::point_arithmetic rustcrypto::derivations rustcrypto::fixed_base_tables
+          rustcrypto::expand_message_xmd_vectors rustcrypto::hash_to_curve_vectors
+        env:
+          RUSTFLAGS: --cfg sha2_backend="soft"
+          MIRIFLAGS: -Zmiri-disable-isolation
+      - run: cargo miri test -p ec-ihat --lib -- components::depths
+        env:
+          RUSTFLAGS: --cfg sha2_backend="soft"
+          MIRIFLAGS: -Zmiri-disable-isolation
+      # Tests that need SHAKE128 are left out for the same reason.
+      - run: >
+          cargo miri test -p ec-act --lib --
+          rustcrypto::coefficients rustcrypto::keys_round_trip
+          rustcrypto::tags_and_reductions
+        env:
+          RUSTFLAGS: --cfg sha2_backend="soft"
+          MIRIFLAGS: -Zmiri-disable-isolation
+
+  mutants:
+    name: Mutation testing (proofs, permutation, encodings, and storage)
+    # Unchanged code gives the same result every week; run this before
+    # releases and spec updates instead.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+      # Fails if any viable mutant survives the test suite, apart from the
+      # exclusions in .cargo/mutants.toml.
+      - run: >
+          cargo mutants -p mole-p256
+          -f crates/mole-p256/src/hash.rs
+          -j 2 --timeout 300
+      - run: >
+          cargo mutants -p ec-ihat
+          -f crates/ec-ihat/src/protocol.rs -f crates/ec-ihat/src/commitment.rs
+          -f crates/ec-ihat/src/permutation.rs
+          -f crates/ec-ihat/src/wire.rs -f crates/ec-ihat/src/storage.rs
+          -j 2 --timeout 300
+      - run: >
+          cargo mutants -p ec-act
+          -f crates/ec-act/src/statements.rs -f crates/ec-act/src/sigma.rs
+          -f crates/ec-act/src/hash.rs -f crates/ec-act/src/wire.rs
+          -j 2 --timeout 300
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo llvm-cov --workspace --lib --summary-only

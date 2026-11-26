@@ -16,6 +16,7 @@ include_rules = [
   "+components/filename_generation",
   "+components/grit",
   "+components/language_detection/content/common",
+  "+components/moderated_endorsements",
   "+components/power_monitor",
   "+components/services/font",
   "+components/services/font_data",

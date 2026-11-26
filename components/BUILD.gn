@@ -530,6 +530,7 @@ test("components_unittests") {
       "//components/media_effects:unit_tests",
       "//components/media_gallery_util:unit_tests",
       "//components/mirroring:mirroring_tests",
+      "//components/moderated_endorsements:unit_tests",
       "//components/navigation_interception:unit_tests",
       "//components/no_state_prefetch/browser:unit_tests",
       "//components/no_state_prefetch/common:unit_tests",

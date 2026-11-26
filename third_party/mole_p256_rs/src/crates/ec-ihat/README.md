@@ -1,0 +1,194 @@
+# ec-ihat
+
+A Rust implementation of **EC-IHAT**, the issuer-hiding anonymous token of
+[draft-authors-mole-ec-ihat](https://moderation-of-unlinkable-endorsements.github.io/internet-drafts/draft-authors-mole-ec-ihat.html),
+for the `P256-SHA256` ciphersuite.
+
+An Anchor issues an Endorsement to a Client in a three-move partially blind
+signature: the Anchor learns neither the Endorsement nor the redemption
+context bound into it. The Client later redeems the Endorsement at a
+Moderator that accepts a list of Anchors, its Anchor Set. The redemption shows
+the signature under a rerandomized key and proves, in size logarithmic in the
+Anchor Set, that the key is a shift of one of the Anchor Set's keys. The
+Moderator learns the Endorsement's nullifier, which it uses to reject a second
+redemption, and nothing about which Anchor issued it.
+
+The implementation tracks the draft and reproduces its test vectors byte for
+byte.
+
+> **Warning:** This code has not been audited. Use it at your own risk.
+
+## Usage
+
+```rust
+use ec_ihat::{Backend, DefaultBackend, PublicKey, SecretKey};
+
+let secret_key_seed = DefaultBackend::generate_seed()?;
+let secret_key: SecretKey = SecretKey::from_seed(&secret_key_seed)?;
+let public_key = secret_key.public_key();            // published
+let ctx_iss = b"epoch-42";                           // agreed out of band
+let ctx_red = b"moderator.example";                  // chosen by the Client
+
+// Issuance: Commit, Challenge, Respond, Finalize.
+let (anchor_state, commitment) = ec_ihat::commit(ctx_iss)?;
+let (client_state, challenge) =
+    ec_ihat::challenge(&public_key, ctx_iss, ctx_red, &commitment)?;
+let response = ec_ihat::respond(&secret_key, anchor_state, &challenge)?;
+let endorsement = ec_ihat::finalize(&public_key, client_state, &response)?;
+
+// Redemption against the Moderator's Anchor Set, in which this Anchor's key
+// is at index 1.
+let other: PublicKey = SecretKey::from_seed(&*DefaultBackend::generate_seed()?)?.public_key();
+let anchor_set = [other, public_key];
+let digest = b"moderator challenge digest";
+let redemption = ec_ihat::redeem(&anchor_set, 1, endorsement, ctx_iss, ctx_red, digest)?;
+let nf = ec_ihat::verify_redemption(&anchor_set, &redemption, ctx_iss, ctx_red, digest)?;
+// reject a repeated nf, and record it before granting anything
+# let _ = nf;
+# Ok::<(), ec_ihat::Error>(())
+```
+
+`CommitMessage`, `ChallengeMessage`, `ResponseMessage`, `Endorsement`, and
+`Redemption` have `to_bytes` and `from_bytes` with the encodings of the
+draft; a redemption is decoded against the size of the Anchor Set.
+`examples/demo.rs` issues from several Anchors and redeems through the
+encodings.
+
+## Storage boundary
+
+`AnchorState` and `ClientState` also have `to_bytes` and `from_bytes`, so a
+session can span processes. These are local formats, not in the draft and
+never sent over the network, prefixed with `AnchorState-` or `ClientState-`
+and the protocol context. They perform no I/O, encryption, or authentication.
+
+Whoever can replay or modify a stored `AnchorState` recovers the signing key
+(Section 5.3 of the draft). The application must authenticate it, for
+example with an AEAD bound to the transport's session identifier, and
+atomically claim the session before `respond`, keeping a tombstone even on
+failure. Decoding a copy does not make consumed state usable again.
+
+## Backends
+
+All group and hash operations go through the `Backend` trait of
+[`mole-p256`](../mole-p256), the P-256 layer shared with `ec-act`, the Rust
+implementation of the MOLE Anonymous Credit Tokens; this crate re-exports it
+as `ec_ihat::backend`. Two implementations are provided, selected by Cargo
+feature:
+
+| Feature                | Curve, SHA-256, hash-to-curve, randomness |
+|------------------------|-------------------------------------------|
+| `rustcrypto` (default) | `p256`, `sha2`, `getrandom`               |
+| `boringssl`            | BoringSSL through `bssl-sys`              |
+
+Both backends encode scalars as 32-byte big-endian integers and points as
+compressed SEC1, reject the identity, and produce identical outputs. Ordinary
+builds select exactly one backend; the explicit `backend-parity` feature
+enables both for interoperability tests and selects `boringssl` as the
+`DefaultBackend`. Every type takes the backend as a type parameter that
+defaults to it.
+
+The permutation `P` needs a constant-time test of whether a 32-byte string
+is the x-coordinate of a point. The `rustcrypto` backend runs `p256`'s
+constant-time decompression; the `boringssl` backend computes
+`(x^3 - 3x + b)^((p+1)/4)` with BoringSSL's constant-time Montgomery
+arithmetic and compares its square.
+
+### Building the BoringSSL backend
+
+`bssl-sys` is not published on crates.io (the registry entry is a
+placeholder), so it must be patched to a BoringSSL checkout built with Rust
+bindings for the host. `scripts/build-boringssl.sh` does that at the commit
+the workspace is tested against (`68083367`, November 2026) and writes a
+Cargo config with the patch:
+
+```sh
+cargo install bindgen-cli          # plus git, cmake, ninja, and clang
+scripts/build-boringssl.sh         # clones and builds into ./boringssl
+
+export BORINGSSL_BUILD_DIR=$PWD/boringssl/build
+cargo test --no-default-features --features boringssl --config boringssl/cargo-config.toml
+```
+
+Run these from the root of the workspace. The patch rewrites `Cargo.lock`;
+restore it before committing.
+
+The crate is `no_std` with `alloc`. The `std` feature enables the standard
+library in `p256` and `getrandom`, and the precomputed generator tables of
+`p256`.
+
+## Design
+
+* **Hashing and derivation** come from `mole-p256`, shared with `ec-act`,
+  under this crate's protocol context `EC-IHATv1-P256-SHA256`:
+  `expand_message_xmd`, `HashToScalar`, `HashToGroup`, and the draft's
+  `DeriveScalars`, `ExpandScalars`, `DeriveNonces`, and `DeriveKeyPair`.
+* **The permutation** (`src/permutation.rs`) implements `PermuteBytes`,
+  `UnpermuteBytes`, `P`, `Pinv`, and `PermutationPair`. `PermutationPair`
+  computes both one-step permutations on each iteration, selects one with
+  `subtle`, and stops at the first valid encoding, so its schedule depends
+  only on the public key it outputs.
+* **The commitment tree** (`src/commitment.rs`) is computed over the hashes
+  of its nodes, since every node enters a commitment through `HashToScalar`.
+  The prover computes every node of every level, selects the binding leaf and
+  each level's sibling by constant-time scans, and selects the opening of an
+  odd last node in constant time, so no branch or memory access depends on
+  the Anchor's index.
+* **Redemption** forms `X_hat` as `delta * B + pkA_i`, selecting the
+  key `pkA_i` from the Anchor Set in constant time. Branch commitments are
+  computed as `(c * X_hat + z * B) - c * pkA_i`, one multiplication per key.
+
+## Security
+
+* The Anchor's signing key and session state, the Client's blinding factors
+  and nullifier, and the redemption's `delta`, index, trapdoors, and first
+  openings are handled in constant time and zeroized after use. On the
+  `boringssl` backend, point addition takes a separate path when its operands
+  are equal or negatives of each other, which for a uniformly random secret
+  operand independent of the other happens with negligible probability.
+  Values that fail to decode are not wiped; their bytes remain the caller's
+  to wipe.
+* `respond` consumes the Anchor's state, `finalize` the Client's, and
+  `redeem` the Endorsement, so none is used twice within a process. An
+  Anchor must also refuse a second challenge for a session it has answered,
+  which the application's session store enforces.
+* Decoding rejects non-canonical scalars and points, the identity element,
+  non-minimal length prefixes, trailing bytes, and redemptions whose vectors
+  do not match the depth of the Anchor Set.
+* `redeem` refuses an empty Anchor Set, and `verify_redemption` rejects
+  one. A redemption against a set of one key names its Anchor.
+* The Moderator must reject a repeated nullifier and record it before
+  granting anything; the crate returns the nullifier and leaves the store to
+  the deployment.
+
+## Testing
+
+```sh
+cargo test                                   # RustCrypto
+cargo test --no-default-features --features boringssl ... # BoringSSL, see above
+cargo test --features backend-parity ...     # both, plus interoperability
+cargo bench                                  # criterion, per backend
+```
+
+`tests/vectors/draft-ladd-mole-ec-ihat-00.txt` is the Test Vectors section of
+the versioned Datatracker draft. Every `rand` entry is replayed in place of
+the random number generator, so every key, message, state, Endorsement, and
+redemption must match byte for byte. Further tests cover issuance and
+redemption at every position of Anchor Sets of 1 to 9 keys and representative
+positions in sets of 16 and 33 keys, tampering with every field of a
+redemption, other contexts, digests, and Anchor Sets, the identity checks of
+`Verify` and `VerifyIssuer`, and the permutation and commitment tree;
+`mole-p256` tests the x-coordinate test against point decoding, the RFC 9380
+known answers, and the other primitives.
+
+The [workspace README](../../README.md) describes continuous integration.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or
+[MIT license](../../LICENSE-MIT) at your option, except the files that carry a
+Google LLC Apache 2.0 header, which are adapted from ACT and are under the
+Apache License, Version 2.0 only.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

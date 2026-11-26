@@ -354,6 +354,10 @@ enum PermissionsPolicyFeature {
   // See https://github.com/explainers-by-googlers/semantic-embedder-api
   kSemanticEmbedder = 151,
 
+  // Controls access to the Moderated Endorsements (MOLE) API
+  // (`navigator.endorsement`, `fetch(url, { moderated })`, `<form moderated>`).
+  kModeratedEndorsements = 152,
+
   // Don't change assigned numbers of any item, and don't reuse removed slots.
   // Add new features at the end of the enum.
   // Run tools/metrics/histograms/update_permissions_policy_enum.py to update

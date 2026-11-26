@@ -63,6 +63,7 @@ class URLLoaderContextForTests : public URLLoaderContext {
   GetIsolatedTransactionFactory(
       const base::UnguessableToken& throttling_profile_id,
       const GURL& url) const override;
+  mojom::MoleAuthObserver* GetMoleAuthObserver() const override;
 
  private:
   mojom::URLLoaderFactoryParams factory_params_;

@@ -98,6 +98,15 @@ if (enable_rust) {
       # TODO: eventually rely on safe primitives instead of the unsafe ones.
       "//third_party/anonymous_tokens:athm",
       "//third_party/anonymous_tokens:athm_clippy",
+
+      # The MOLE P-256 and EC-ACT backends (mole-p256, ec-act) use BoringSSL
+      # P-256 group, BIGNUM, SHA-256, SHAKE128 (EVP_shake128), hash-to-curve,
+      # and RNG bindings not yet surfaced by bssl_crypto.
+      "//third_party/mole_p256_rs:*",
+
+      # The MOLE demo servers (dev-only, not shipped) run a BoringSSL TLS 1.3
+      # listener so the 4-origin demo and E2E tests speak real HTTPS.
+      "//third_party/mole/mole_demo:*",
     ]
 
     bindgen_deps = [ ":raw_bssl_sys_bindings" ]
@@ -129,7 +138,6 @@ if (is_msan) {
 } else if (is_win && (current_cpu == "x86" || current_cpu == "x64")) {
   # Windows' x86 and x86_64 assembly is built with NASM.
   import("//third_party/nasm/nasm_assemble.gni")
-
   nasm_assemble("boringssl_asm") {
     visibility = [ ":*" ]
     sources = rebase_path(bcm_sources_nasm + crypto_sources_nasm, ".", "src")

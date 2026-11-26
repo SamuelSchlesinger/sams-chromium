@@ -13,21 +13,65 @@
 #include "net/http/http_auth_scheme.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_response_headers.h"
+#include "net/http/http_util.h"
 #include "net/log/net_log_with_source.h"
 
 namespace net {
 
 namespace {
 
-bool ShouldRedactChallenge(HttpAuthChallengeTokenizer* challenge) {
-  // Ignore lines with commas, as they may contain lists of schemes, and
-  // the information we want to hide is Base64 encoded, so has no commas.
-  if (challenge->challenge_text().find(',') != std::string::npos)
-    return false;
+// Scans a `WWW-Authenticate` or `Proxy-Authenticate` header value for a
+// comma-separated `Mole` challenge (e.g. `Basic realm="api", Mole challenge=...`).
+// If found, returns the substring slice starting at the `Mole` parameters (or
+// the `Mole` token itself if parameterless) so `ElideHeaderValueForNetLog`
+// redacts everything from `Mole` onward.
+std::string_view FindTrailingMoleChallengeParams(std::string_view value) {
+  constexpr std::string_view kMoleScheme = "mole";
+  size_t pos = 0;
+  while (pos < value.size()) {
+    size_t comma = value.find(',', pos);
+    if (comma == std::string_view::npos) {
+      break;
+    }
+    size_t token_start = comma + 1;
+    while (token_start < value.size() && HttpUtil::IsLWS(value[token_start])) {
+      ++token_start;
+    }
+    if (value.size() - token_start >= kMoleScheme.size() &&
+        base::EqualsCaseInsensitiveASCII(
+            value.substr(token_start, kMoleScheme.size()), kMoleScheme)) {
+      size_t after_scheme = token_start + kMoleScheme.size();
+      if (after_scheme == value.size()) {
+        return value.substr(token_start);
+      }
+      if (HttpUtil::IsLWS(value[after_scheme])) {
+        while (after_scheme < value.size() &&
+               HttpUtil::IsLWS(value[after_scheme])) {
+          ++after_scheme;
+        }
+        return after_scheme < value.size() ? value.substr(after_scheme)
+                                           : value.substr(token_start);
+      }
+    }
+    pos = comma + 1;
+  }
+  return {};
+}
 
+bool ShouldRedactChallenge(HttpAuthChallengeTokenizer* challenge) {
   const std::string& scheme = challenge->auth_scheme();
   // Invalid input.
   if (scheme.empty())
+    return false;
+
+  // Always redact `Mole` challenges, which carry comma-separated RFC 9110
+  // auth-params (`WWW-Authenticate: Mole challenge=..., ...`).
+  if (scheme == "mole")
+    return true;
+
+  // Ignore lines with commas, as they may contain lists of schemes, and
+  // the information we want to hide is Base64 encoded, so has no commas.
+  if (challenge->challenge_text().find(',') != std::string::npos)
     return false;
 
   // Ignore Basic and Digest authentication challenges, as they contain
@@ -50,15 +94,24 @@ std::string ElideHeaderValueForNetLog(NetLogCaptureMode capture_mode,
         base::EqualsCaseInsensitiveASCII(header, "set-cookie2") ||
         base::EqualsCaseInsensitiveASCII(header, "cookie") ||
         base::EqualsCaseInsensitiveASCII(header, "authorization") ||
-        base::EqualsCaseInsensitiveASCII(header, "proxy-authorization")) {
+        base::EqualsCaseInsensitiveASCII(header, "proxy-authorization") ||
+        base::EqualsCaseInsensitiveASCII(header, "sec-mole-authorization") ||
+        base::EqualsCaseInsensitiveASCII(header, "mole-credential") ||
+        base::EqualsCaseInsensitiveASCII(header, "mole-challenge") ||
+        base::EqualsCaseInsensitiveASCII(header, "mole-info")) {
       redact = value;
     } else if (base::EqualsCaseInsensitiveASCII(header, "www-authenticate") ||
                base::EqualsCaseInsensitiveASCII(header, "proxy-authenticate")) {
       // Look for authentication information from data received from the server
-      // in multi-round Negotiate authentication.
+      // in multi-round Negotiate authentication or MOLE challenges.
       HttpAuthChallengeTokenizer challenge(value);
       if (ShouldRedactChallenge(&challenge)) {
         redact = challenge.params();
+        if (redact.empty()) {
+          redact = value;
+        }
+      } else {
+        redact = FindTrailingMoleChallengeParams(value);
       }
     }
   }

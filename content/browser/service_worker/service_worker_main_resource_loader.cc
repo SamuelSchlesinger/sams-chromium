@@ -599,6 +599,12 @@ bool ServiceWorkerMainResourceLoader::StartRaceNetworkRequest(
     return false;
   }
 
+  // Never race/clone requests carrying single-use Moderated Endorsements (MOLE)
+  // parameters so both branches cannot double-spend a credential.
+  if (resource_request_.mole_params.has_value()) {
+    return false;
+  }
+
   // RaceNetworkRequest is triggered only if the scheme is HTTP or HTTPS.
   // crbug.com/1477990
   if (!resource_request_.url.SchemeIsHTTPOrHTTPS()) {
@@ -1174,6 +1180,11 @@ bool ServiceWorkerMainResourceLoader::MaybeStartSyntheticNetworkRequest(
     // Back/forward history navigations and tab restores set
     // `net::LOAD_SKIP_CACHE_VALIDATION` to prefer cached content without
     // revalidation. Synthetic response must not intercept these navigations.
+    return false;
+  }
+  if (resource_request_.mole_params.has_value()) {
+    // Never bypass or synthesize main-resource loads carrying single-use MOLE
+    // credentials.
     return false;
   }
 

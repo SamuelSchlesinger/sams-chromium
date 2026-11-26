@@ -30,6 +30,7 @@
 #include "services/network/public/mojom/devtools_observer.mojom.h"
 #include "services/network/public/mojom/fetch_retry_options.mojom.h"
 #include "services/network/public/mojom/ip_address_space.mojom.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom.h"
 #include "services/network/public/mojom/trust_token_access_observer.mojom.h"
 #include "services/network/public/mojom/trust_tokens.mojom.h"
 #include "services/network/public/mojom/url_loader.mojom-shared.h"
@@ -175,7 +176,8 @@ bool StructTraits<
       !data.ReadStorageAccessApiStatus(&out->storage_access_api_status) ||
       !data.ReadSocketTag(&out->socket_tag) ||
       !data.ReadPermissionsPolicy(&out->permissions_policy) ||
-      !data.ReadFetchRetryOptions(&out->fetch_retry_options)) {
+      !data.ReadFetchRetryOptions(&out->fetch_retry_options) ||
+      !data.ReadMoleParams(&out->mole_params.as_ptr())) {
     // Note that data.ReadTrustTokenParams is temporarily handled below.
     return false;
   }

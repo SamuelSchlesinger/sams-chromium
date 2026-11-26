@@ -10,6 +10,8 @@
 #include "services/network/public/cpp/request_destination.h"
 #include "services/network/public/cpp/request_mode.h"
 #include "services/network/public/mojom/ip_address_space.mojom-blink.h"
+#include "services/network/public/mojom/moderated_endorsements.mojom-blink.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
 #include "services/network/public/mojom/trust_tokens.mojom-blink.h"
 #include "third_party/blink/public/common/blob/blob_utils.h"
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
@@ -21,6 +23,8 @@
 #include "third_party/blink/renderer/bindings/core/v8/v8_blob.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_form_data.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_ip_address_space.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_moderated_request_init.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_moderation_behavior.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_private_token.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_readable_stream.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_request_cache.h"
@@ -30,6 +34,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/v8_request_mode.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_request_redirect.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_retry_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_boolean_moderatedrequestinit.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_request_usvstring.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_url_search_params.h"
 #include "third_party/blink/renderer/core/dom/abort_signal.h"
@@ -43,6 +48,8 @@
 #include "third_party/blink/renderer/core/fileapi/blob.h"
 #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
 #include "third_party/blink/renderer/core/frame/deprecation/deprecation.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/forms/form_data.h"
 #include "third_party/blink/renderer/core/loader/threadable_loader.h"
@@ -182,6 +189,7 @@ FetchRequestData* CreateCopyOfFetchRequestDataForFetch(
   }
   request->SetWindowId(original->WindowId());
   request->SetTrustTokenParams(original->TrustTokenParams());
+  request->SetMoleParams(original->MoleParams());
   request->SetServiceWorkerRaceNetworkRequestToken(
       original->ServiceWorkerRaceNetworkRequestToken());
   if (RuntimeEnabledFeatures::FetchRetryEnabled(context) &&
@@ -210,7 +218,7 @@ static bool AreAnyMembersPresent(const RequestInit* init) {
          init->hasCache() || init->hasRedirect() || init->hasIntegrity() ||
          init->hasKeepalive() || init->hasPriority() || init->hasSignal() ||
          init->hasDuplex() || init->hasPrivateToken() ||
-         init->hasRetryOptions();
+         init->hasModerated() || init->hasRetryOptions();
 }
 
 static BodyStreamBuffer* ExtractBody(ScriptState* script_state,
@@ -739,6 +747,82 @@ Request* Request::CreateRequestWithRequestOrString(
     }
 
     request->SetTrustTokenParams(std::move(params));
+  }
+
+  if (init->hasModerated()) {
+    const V8UnionBooleanOrModeratedRequestInit* moderated_opt =
+        init->moderated();
+    if (moderated_opt->IsBoolean() && !moderated_opt->GetAsBoolean()) {
+      request->SetMoleParams(std::nullopt);
+    } else {
+      if (!execution_context->IsSecureContext()) {
+        exception_state.ThrowTypeError(
+            "moderated: Moderated Endorsements are only available in secure "
+            "contexts.");
+        return nullptr;
+      }
+      const bool context_supported =
+          (execution_context->IsWindow() &&
+           (!To<LocalDOMWindow>(execution_context)->GetFrame() ||
+            !To<LocalDOMWindow>(execution_context)
+                 ->GetFrame()
+                 ->IsInFencedFrameTree())) ||
+          execution_context->IsServiceWorkerGlobalScope();
+      if (!context_supported) {
+        exception_state.ThrowDOMException(
+            DOMExceptionCode::kNotAllowedError,
+            "moderated: Moderated Endorsements are only supported in active "
+            "document windows and service workers.");
+        return nullptr;
+      }
+      if (!execution_context->IsFeatureEnabled(
+              network::mojom::blink::PermissionsPolicyFeature::
+                  kModeratedEndorsements)) {
+        exception_state.ThrowDOMException(
+            DOMExceptionCode::kNotAllowedError,
+            "moderated: The 'moderated-endorsements' Permissions Policy is "
+            "disabled in this context.");
+        return nullptr;
+      }
+      scoped_refptr<const SecurityOrigin> req_origin =
+          SecurityOrigin::Create(request->Url());
+      if (!request->Url().ProtocolIsInHttpFamily() || !req_origin ||
+          req_origin->IsOpaque() || !req_origin->IsPotentiallyTrustworthy()) {
+        exception_state.ThrowTypeError(
+            "moderated: Request URL must be potentially trustworthy (HTTPS).");
+        return nullptr;
+      }
+
+      network::mojom::blink::MoleRequestParams mole_params;
+      if (moderated_opt->IsModeratedRequestInit()) {
+        const ModeratedRequestInit* dict =
+            moderated_opt->GetAsModeratedRequestInit();
+        if (dict->hasModerator()) {
+          KURL mod_url(dict->moderator());
+          scoped_refptr<const SecurityOrigin> mod_origin =
+              SecurityOrigin::Create(mod_url);
+          if (!mod_url.IsValid() || !mod_url.ProtocolIsInHttpFamily() ||
+              !mod_origin || mod_origin->IsOpaque() ||
+              !mod_origin->IsPotentiallyTrustworthy()) {
+            exception_state.ThrowTypeError(
+                "moderated: moderator must be a valid potentially trustworthy "
+                "HTTPS URL.");
+            return nullptr;
+          }
+          mole_params.moderator = std::move(mod_origin);
+        }
+        mole_params.behavior =
+            dict->behavior().AsEnum() ==
+                    V8ModerationBehavior::Enum::kChallengeOnly
+                ? network::mojom::blink::MoleModerationBehavior::kChallengeOnly
+                : network::mojom::blink::MoleModerationBehavior::kAuto;
+        if (dict->hasMaxCost()) {
+          mole_params.max_cost = dict->maxCost();
+        }
+        mole_params.allow_deferred_update = dict->allowDeferredUpdate();
+      }
+      request->SetMoleParams(std::move(mole_params));
+    }
   }
 
   // "Let  signals  be [|signal|] if  signal  is non-null; otherwise []."
@@ -1271,6 +1355,13 @@ mojom::blink::FetchAPIRequestPtr Request::CreateFetchAPIRequest() const {
         mojom::blink::Referrer::New(KURL(NullUrl(), request_->ReferrerString()),
                                     request_->GetReferrerPolicy());
     DCHECK(fetch_api_request->referrer->url.IsValid());
+  }
+  if (request_->MoleParams().has_value()) {
+    fetch_api_request->mole_params =
+        network::mojom::blink::MoleRequestParams::New(
+            request_->MoleParams()->moderator, request_->MoleParams()->behavior,
+            request_->MoleParams()->max_cost,
+            request_->MoleParams()->allow_deferred_update);
   }
   // FIXME: How can we set isReload properly? What is the correct place to load
   // it in to the Request object? We should investigate the right way to plumb

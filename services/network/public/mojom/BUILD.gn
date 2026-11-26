@@ -654,6 +654,7 @@ mojom("url_loader_base") {
     "link_header.mojom",
     "load_timing_info.mojom",
     "load_timing_internal_info.mojom",
+    "moderated_endorsements.mojom",
     "network_change_manager.mojom",
     "network_interface.mojom",
     "network_interface_change_listener.mojom",
