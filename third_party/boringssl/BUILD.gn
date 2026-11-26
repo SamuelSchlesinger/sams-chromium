@@ -103,6 +103,10 @@ if (enable_rust) {
       # P-256 group, BIGNUM, SHA-256, SHAKE128 (EVP_shake128), hash-to-curve,
       # and RNG bindings not yet surfaced by bssl_crypto.
       "//third_party/mole_p256_rs:*",
+
+      # The MOLE demo servers (dev-only, not shipped) run a BoringSSL TLS 1.3
+      # listener so the 4-origin demo and E2E tests speak real HTTPS.
+      "//third_party/mole/mole_demo:*",
     ]
 
     bindgen_deps = [ ":raw_bssl_sys_bindings" ]

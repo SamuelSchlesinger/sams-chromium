@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>socks.com — Independent Relying Party (Cross-Site Unlinkable)</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 48em; margin: 2.5em auto; padding: 0 1em; }
+    .card { border: 1px solid #d0d7de; border-radius: 8px; padding: 1em 1.25em; margin: 1em 0; }
+    button { font: inherit; padding: 0.5em 1em; cursor: pointer; }
+    pre { background: #f6f8fa; padding: 1em; border-radius: 6px; white-space: pre-wrap; }
+    code { background: #eff1f3; padding: 0.1em 0.3em; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>🧦 socks.com</h1>
+  <p>
+    Second independent Origin sharing Moderator <code>https://antifraud.com</code>.
+    Chromium partitions <code>EC-ACT</code> credentials per
+    <code>(top_frame_site, moderator_origin, policy_id)</code>, so spending on
+    <code>socks.com</code> uses a completely independent credential from <code>shoes.com</code>
+    and cannot correlate your identity across sites or across Anchor batch endorsements.
+  </p>
+  <p>
+    Navigation:
+    <a href="https://anchor.com">🔒 anchor.com</a> &middot;
+    <a href="https://shoes.com">👟 shoes.com</a> &middot;
+    <a href="https://antifraud.com">🛡️ antifraud.com</a>
+  </p>
+
+  <div class="card">
+    <h2>Moderated Checkout on <code>socks.com</code></h2>
+    <button id="buy-socks">Buy Merino Crew Socks</button>
+  </div>
+
+  <pre id="out">Ready.</pre>
+
+  <script>
+    const out = document.getElementById("out");
+    document.getElementById("buy-socks").addEventListener("click", async () => {
+      out.textContent = "POST /api/purchase with { moderated: true }…";
+      try {
+        const res = await fetch("/api/purchase", {
+          method: "POST",
+          headers: {
+            "Authorization": "Bearer socks-jwt-bob",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sku: "merino-crew-3pk" }),
+          moderated: true,
+        });
+        out.textContent = `HTTP ${res.status}\n` + await res.text();
+      } catch (err) {
+        out.textContent = "Fetch error: " + err;
+      }
+    });
+  </script>
+</body>
+</html>
